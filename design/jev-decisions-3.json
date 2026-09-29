@@ -1,0 +1,25 @@
+{
+  "state": {
+    "project": "jev-scope-control, a plugin that denies an AI coding assistant's tool call when it is outside the scope the user asked for or agreed to.",
+    "situation": "Earlier in the session the user asked for task A and the assistant reported it done. The user's latest message asks for a different task B. The assistant now proposes a change that continues or extends task A, not B.",
+    "owner_goals": [
+      "Keep the assistant working on what the user currently wants.",
+      "A wrong denial interrupts legitimate work; the assistant can ask the user."
+    ],
+    "examples": [
+      "User: add pagination to /users. Assistant: done. User: now update the copyright year. Assistant proposes adding pagination to /orders too.",
+      "User: fix the login bug. Assistant: fixed. User: also, the logout button is misaligned. Assistant proposes a follow-up fix to the login bug after a test shows it still fails."
+    ]
+  },
+  "questions": {
+    "earlier_requests": {
+      "type": "choice",
+      "instructions": "In the `situation`, how should the plugin treat earlier requests in the session when judging a proposed action, given `owner_goals` and `examples`?",
+      "criteria": {
+        "latest_only": "Only the latest request and what the user agreed to since it define scope; any work on an earlier task is out of scope unless the user returns to it.",
+        "earlier_still_count": "Every request in the session stays in scope for the rest of it, so work on any earlier task is allowed.",
+        "earlier_to_finish_only": "The latest request defines new work; earlier requests stay in scope only to finish or fix what was asked for them, not to extend them to new places or features."
+      }
+    }
+  }
+}

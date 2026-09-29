@@ -1,0 +1,29 @@
+{
+  "state": {
+    "project": "jev-scope-control, a plugin for AI coding assistants. Before a tool call runs, it asks Jev whether the call is within the scope the user asked for or agreed to. If not, it denies the call and tells the assistant why.",
+    "measured_latency": "A Jev check takes about 0.2 to 1 second.",
+    "call_mix": "In a typical coding session most tool calls are file reads, searches, and read-only shell commands such as ls, git status or grep; a minority are edits, writes, and commands that change files, packages, git history, or remote services.",
+    "harm_model": "Scope creep hurts the user when the assistant changes things they did not ask for: extra refactors, unrequested features, edits to unrelated files, commits, pushes, deploys, installs, or deletions. Reading a file changes nothing, though an assistant reading far outside the task can be a sign it is wandering.",
+    "false_denial_cost": "A wrong denial interrupts legitimate work and the assistant must argue its case or ask the user.",
+    "sibling_rule": "The sibling plugin jev-no-bullshit calls each item out at most once per user request and sends the assistant back at most once, so its feedback is never a loop."
+  },
+  "questions": {
+    "check_reads": {
+      "type": "noul",
+      "instructions": "Given `harm_model`, `call_mix` and `false_denial_cost`, should the plugin deny file reads and searches that it judges outside the task?",
+      "criteria": {
+        "true": "Denying unrelated reads prevents harm to the user that outweighs the extra denials of legitimate exploration.",
+        "false": "Reads change nothing, and denying exploration costs more than it saves; checks belong on calls that change something."
+      }
+    },
+    "repeat_policy": {
+      "type": "choice",
+      "instructions": "The plugin denied an out-of-scope tool call. The assistant tries a call with the same effect again, and the user has written nothing since. Given `harm_model`, `false_denial_cost` and `sibling_rule`, what should the plugin do?",
+      "criteria": {
+        "deny_again": "Deny it again with the same reason: only the user can widen the scope, so the assistant should ask the user rather than retry.",
+        "allow_second_try": "Let it through: the assistant was warned once and chose to proceed, which may mean the denial was wrong.",
+        "deny_again_until_cap": "Deny it again, but after a fixed number of denials in one user request stop checking for the rest of that request and tell the user, so a wrong judgment cannot stall the work."
+      }
+    }
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "state": {
+    "project": "jev-scope-control, a plugin for AI coding assistants (Claude Code, Codex, pi, opencode). Before the assistant's tool call runs, it sends Jev the user's request, the conversation, and the proposed tool call, and asks whether the call is within the scope the user asked for or agreed to, explicitly or implicitly. If not, it stops the call and tells the assistant why.",
+    "owner_goals": [
+      "Keep the assistant on track and inside the scope the user defined or agreed to.",
+      "Never trap or stall the user's work: a problem with the check fails open.",
+      "Work the same way on all four harnesses, as the sibling plugin jev-no-bullshit does.",
+      "Every tool call that is checked waits for Jev, so each check adds about one to three seconds."
+    ],
+    "sibling_plugin": "jev-no-bullshit checks the assistant's final summary when a turn ends, sends the assistant back at most once per request by default, calls out each item at most once, fails open on any error, and is a single standard-library Python script shared by all four harnesses with thin TypeScript shims for pi and opencode.",
+    "harness_facts": [
+      "Claude Code's PreToolUse hook can deny a call with a reason the model sees, or ask the user to approve it.",
+      "Codex, pi and opencode can block a call with a reason the model sees; asking the user is not available on all of them.",
+      "Read-only tools such as reading files and searching cannot change anything outside the conversation."
+    ]
+  },
+  "questions": {
+    "enforcement": {
+      "type": "choice",
+      "instructions": "When Jev judges that a proposed tool call in `project` is outside the user's scope, what should the plugin do, given `owner_goals` and `harness_facts`?",
+      "criteria": {
+        "deny_with_reason": "Stop the call and tell the assistant why; the assistant can then ask the user or do something else.",
+        "ask_user": "Pause and ask the user to approve or reject the call where the harness supports it, and deny with a reason elsewhere.",
+        "warn_only": "Let the call run and attach a note to the assistant afterwards."
+      }
+    },
+    "gated_tools": {
+      "type": "choice",
+      "instructions": "Which tool calls should the plugin in `project` check, given `owner_goals` and `harness_facts`?",
+      "criteria": {
+        "every_call": "Every tool call, including reads and searches.",
+        "changing_calls": "Only calls that can change something: file edits and writes, shell commands that are not known to be read-only, and tools from external services; reads and searches pass unchecked.",
+        "file_edits_only": "Only file edits and writes; shell commands and external tools pass unchecked."
+      }
+    },
+    "repeat_policy": {
+      "type": "choice",
+      "instructions": "After the plugin in `project` has stopped a tool call once, and the assistant tries the same call again without new input from the user, what should happen?",
+      "criteria": {
+        "block_until_user_agrees": "Stop it every time until the conversation shows the user agreed to it.",
+        "allow_on_retry": "Let the repeated call through, since the assistant has been warned once, matching the sibling plugin's call-out-once rule.",
+        "cap_per_request": "Keep stopping out-of-scope calls, but stop at most a fixed number of calls per user request, then let calls through and tell the user."
+      }
+    },
+    "approval_evidence": {
+      "type": "choice",
+      "instructions": "What should the plugin in `project` treat as the scope the user asked for or agreed to?",
+      "criteria": {
+        "user_messages_only": "Only what the user wrote.",
+        "user_messages_and_agreed_proposals": "What the user wrote, plus plans and proposals the assistant stated that the user approved or went along with, such as an approved plan or a proposal followed by the user saying go ahead.",
+        "whole_transcript": "Everything in the session, including every tool call and result."
+      }
+    },
+    "subagents": {
+      "type": "choice",
+      "instructions": "Tool calls made by a subagent that the main assistant started: how should the plugin in `project` judge their scope?",
+      "criteria": {
+        "against_user_request": "Against the user's request and agreements in the main conversation, with the subagent's task as extra context.",
+        "against_subagent_task": "Only against the task the main assistant gave the subagent.",
+        "skip": "Do not check subagents' tool calls."
+      }
+    }
+  }
+}

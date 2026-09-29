@@ -1,0 +1,14 @@
+{
+  "name": "jev-scope-control",
+  "owner": {
+    "name": "Greg Havens"
+  },
+  "description": "The jev-scope-control PreToolUse hook for Claude Code and Codex.",
+  "plugins": [
+    {
+      "name": "jev-scope-control",
+      "source": "./",
+      "description": "PreToolUse hook that asks Jev whether a tool call is within the scope the user asked for or agreed to, and denies it with a reason when it is not."
+    }
+  ]
+}

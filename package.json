@@ -1,0 +1,20 @@
+{
+  "name": "jev-scope-control",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PreToolUse hook that asks Jev whether a tool call is within the scope the user asked for or agreed to, and denies it with a reason when it is not.",
+  "type": "module",
+  "repository": "github:greghavens/jev-scope-control",
+  "keywords": [
+    "pi-package",
+    "opencode",
+    "jev",
+    "typesafe"
+  ],
+  "main": "./opencode/jev-scope-control.ts",
+  "pi": {
+    "extensions": [
+      "./pi/jev-scope-control.ts"
+    ]
+  }
+}

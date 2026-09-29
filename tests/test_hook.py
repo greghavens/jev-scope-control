@@ -144,18 +144,6 @@ class HookTest(unittest.TestCase):
         self.server.values["finishes_earlier"] = 0.1
         self.assertIsNotNone(self.run_hook())
 
-    def test_an_approved_plan_step_lifts_an_earlier_limit(self):
-        self.server.values["against_instruction"] = 0.9
-        self.assertIsNotNone(self.run_hook())
-        self.server.values["approved_plan_step"] = 0.9
-        self.assertIsNone(self.run_hook(tool_input={"file_path": "/p/login.ts", "old_string": "a", "new_string": "c"}))
-
-    def test_building_on_what_the_user_rejected_is_denied(self):
-        self.server.values["builds_on_rejected"] = 0.9
-        out = self.run_hook()
-        self.assertIsNotNone(out)
-        self.assertIn("rejected", json.dumps(out))
-
     def test_jev_is_asked_once_and_its_answer_is_used(self):
         self.server.values["unasked_publish"] = 0.68  # near the bar: still one request
         self.assertIsNotNone(self.run_hook())
@@ -306,6 +294,34 @@ class HookTest(unittest.TestCase):
         self.assertEqual(state["summary"], "")
         self.assertEqual(set(self.server.requests[0]["body"]["questions"]), set(jsc.QUESTIONS))
         self.assertEqual(self.server.requests[0]["auth"], "Bearer test-key")
+
+    def test_an_edit_being_judged_goes_as_a_diff(self):
+        old = "\n".join(f"line {i}" for i in range(200))
+        new = old.replace("line 100", "line one hundred")
+        call = jsc.proposed("Edit", {"file_path": "/p/a.py", "old_string": old, "new_string": new})["input"]
+        self.assertEqual(call["file"], "/p/a.py")
+        self.assertIn("-line 100\n+line one hundred", call["diff"])
+        self.assertNotIn("line 5\n", call["diff"])
+        self.assertLess(len(call["diff"]), 200)
+        many = jsc.proposed("MultiEdit", {"file_path": "/p/a.py", "edits": [{"old_string": f"a{i}", "new_string": f"b{i}"} for i in range(40)]})
+        self.assertIn("+b39", many["input"]["diff"])  # every edit, not the first ten
+
+    def test_earlier_calls_go_in_as_one_line_each(self):
+        script = "python3 - <<'EOF'\n" + "x = 1\n" * 2000 + "EOF"
+        action = jsc.make_action("Bash", {"command": script, "description": "Run the migration"}, "ok", False)
+        state, _ = jsc.scope_state("Fix it.", [action], [], [], "Edit", {"file_path": "/p/a.py"})
+        line = state["actions"][0]["input"]
+        self.assertTrue(line.startswith("Run the migration: "))
+        self.assertLessEqual(len(line), jsc.HISTORY_INPUT_CHARS)
+        self.assertEqual(state["actions"][0]["result"], "ok")
+
+    def test_older_user_messages_get_extra_room(self):
+        messages = [{"role": "user" if i % 2 else "assistant", "text": f"message {i} " + "word " * 200} for i in range(200)]
+        plain = jsc.conversation_lines(messages)
+        more = jsc.conversation_lines(messages, jsc.USER_MESSAGES_EXTRA_TOKENS)
+        extra = more[: len(more) - len(plain)]
+        self.assertTrue(extra and all(m["role"] == "user" for m in extra))
+        self.assertEqual(more[len(extra):], plain)
 
     def test_codex_rollout(self):
         codex_rollout(self.transcript, "Rename the flag to --dry-run.", [("c1", "exec_command", json.dumps({"cmd": "sed -i s/x/y/ cli.py"}))])

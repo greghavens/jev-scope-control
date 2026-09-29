@@ -1,5 +1,5 @@
 // pi's half of jev-scope-control. Before a tool runs, send the call and the
-// context jev-no-bullshit's pi plugin sends to the Python script, which asks
+// context to the Python script, which asks
 // Jev whether the call is within what the person asked for or agreed to. A denied call is blocked with the script's reason,
 // which the model sees as the tool's result.
 import { spawn } from "node:child_process"
@@ -9,7 +9,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 const SCRIPT = fileURLToPath(new URL("../jev-scope-control", import.meta.url))
 // Above the script's 5 s Jev timeout, so the script fails open by itself.
 const TIMEOUT_MS = 15_000
-const NO_BULLSHIT_TAG = "[jev-no-bullshit]"
 
 type Call = { tool: string; input: unknown; result: string | null; error: boolean; now: boolean }
 
@@ -39,19 +38,18 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     // pi blocks the call when a handler throws, so nothing here may.
     try {
-      // The same messages jev-no-bullshit reads: the branch's messages, with its hook messages as "custom".
+      // The branch's messages, with extension messages as "custom".
       const messages: { role: string; content?: unknown; toolCallId?: string; isError?: boolean }[] = []
       for (const entry of ctx.sessionManager.getBranch()) {
         if (entry.type === "message") messages.push(entry.message as (typeof messages)[number])
         else if (entry.type === "custom_message") messages.push({ role: "custom", content: entry.content })
       }
 
-      // From here on, what jev-no-bullshit's pi plugin sends. The task is the person's last message;
-      // jev-no-bullshit's feedback goes in as custom messages, so it is not one.
+      // The task is the person's last message.
       let taskIndex = -1
       for (let i = messages.length - 1; i >= 0; i--) {
         const m = messages[i]
-        if (m.role === "user" && text(m.content).trim() && !text(m.content).trimStart().startsWith(NO_BULLSHIT_TAG)) {
+        if (m.role === "user" && text(m.content).trim()) {
           taskIndex = i
           break
         }

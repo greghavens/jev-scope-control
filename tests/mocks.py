@@ -1,4 +1,4 @@
-"""Local HTTP stand-ins for the TypeSafe API and the model APIs used by the tests (adapted from jev-no-bullshit)."""
+"""Local HTTP stand-ins for the TypeSafe API and the model APIs used by the tests."""
 
 import json
 import sys

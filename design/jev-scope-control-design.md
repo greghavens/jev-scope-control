@@ -144,7 +144,7 @@ A wrong denial costs one turn: the assistant is told to ask the user or continue
 - **Fail open**: no key, a network error, a Jev error or a 5-second timeout allow the call. The first failure in a session is shown to the user once (`systemMessage`); every failure is logged.
 - **Cap**: at most `JEV_SCOPE_CONTROL_MAX_DENIALS` (default 3) denials per user request; then checks stop for that request and the user is told.
 - **Threshold**: `JEV_SCOPE_CONTROL_THRESHOLD` (default 0.65).
-- **Key**: this plugin's own key first, so its Jev usage can be tracked on a key of its own: `JEV_SCOPE_CONTROL_API_KEY` from the environment, else the key in `~/.config/jev-scope-control/env` (`JEV_SCOPE_CONTROL_API_KEY=` or `TYPESAFE_API_KEY=`). Then the shared key: `TYPESAFE_API_KEY` from the environment, else `~/.config/jev-no-bullshit/env`, so an existing jev-no-bullshit install works without another step. Only sent over https (http only to localhost, for tests).
+- **Key**: `TYPESAFE_API_KEY` from `~/.config/jev-scope-control/env`, this plugin's own file, so its Jev usage can be tracked on a key of its own; else `TYPESAFE_API_KEY` from the environment. Only sent over https (http only to localhost, for tests).
 - **Private files**: `~/.jev-scope-control/` is owner-only.
 - **Known risk**: file contents and tool results in the state can sway Jev. A proposed write containing "the user approved this" is text in `proposed_action`, not the user's message; the questions name `request` and `conversation` as the only sources of scope. Tested in the labeled cases.
 

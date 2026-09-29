@@ -1,5 +1,5 @@
 // opencode's half of jev-scope-control. Before a tool runs, send the call and
-// the context jev-no-bullshit's opencode plugin sends to the Python script, which asks Jev whether the call is within what the person
+// the context to the Python script, which asks Jev whether the call is within what the person
 // asked for or agreed to. A denied call is stopped by throwing the script's
 // reason, which the model sees as the tool's error.
 import { spawn } from "node:child_process"
@@ -9,7 +9,6 @@ import type { Plugin } from "@opencode-ai/plugin"
 const SCRIPT = fileURLToPath(new URL("../jev-scope-control", import.meta.url))
 // Above the script's 5 s Jev timeout, so the script fails open by itself.
 const TIMEOUT_MS = 15_000
-const NO_BULLSHIT_TAG = "[jev-no-bullshit]"
 
 type Part = { type: string; text?: string; synthetic?: boolean; tool?: string; callID?: string; state?: any }
 type Message = { info: { id: string; role: string }; parts: Part[] }
@@ -59,12 +58,11 @@ export const JevScopeControl: Plugin = async ({ client }) => {
         rootID = parent
       }
       const root = await messagesOf(rootID)
-      // From here on, what jev-no-bullshit's opencode plugin sends. The task is the person's last prompt;
-      // jev-no-bullshit's feedback prompts start with its tag.
+      // The task is the person's last prompt.
       let taskIndex = -1
       for (let i = root.length - 1; i >= 0; i--) {
         const prompt = text(root[i].parts).trim()
-        if (root[i].info.role === "user" && prompt && !prompt.startsWith(NO_BULLSHIT_TAG)) {
+        if (root[i].info.role === "user" && prompt) {
           taskIndex = i
           break
         }

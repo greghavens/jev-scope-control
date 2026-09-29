@@ -13,9 +13,9 @@ compose = jsc.compose
 
 
 def case_state(case: dict) -> dict:
-    """A labeled case's state as the hook builds it: jev-no-bullshit's context, plus the case's call.
+    """A labeled case's state as the hook builds it: the context, plus the case's call.
 
-    Cases record the conversation before the request; jev-no-bullshit's conversation includes it."""
+    Cases record the conversation before the request; the hook's conversation includes it."""
     conversation = [*case.get("conversation", []), {"role": "user", "text": case["request"]}]
     actions = [jsc.make_action(a["tool"], a["input"], a.get("result"), False) for a in case.get("actions_so_far", [])]
     call = case["proposed_action"]

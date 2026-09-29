@@ -5,16 +5,16 @@ Before an exec, write or edit tool call runs, ask Jev (TypeSafe's System One mod
 call is within the scope the user asked for or agreed to, explicitly or implicitly. If it isn't, deny
 the call and tell the assistant why. See design/jev-scope-control-design.md.
 
-Standard library only. Reads TYPESAFE_API_KEY from the environment, or else from
-~/.config/jev-scope-control/env or ~/.config/jev-no-bullshit/env. Always exits 0 and fails open: any
+Standard library only. Reads TYPESAFE_API_KEY from ~/.config/jev-scope-control/env, else from the
+environment. Always exits 0 and fails open: any
 error lets the call run.
 
-The context sent to Jev is what jev-no-bullshit sends, reproduced in this script: `task` (the user's last message), `conversation`, `actions`,
+The context sent to Jev: `task` (the user's last message), `conversation`, `actions`,
 `earlier_actions`, `summary` and `sentences`. Before the call runs there is no reply, so `summary` is
 empty. The call itself is added as `proposed_action`.
 
 Claude Code and Codex send a PreToolUse event naming their transcript. The pi and opencode plugins
-(pi/, opencode/) have no transcript file to name, so they send what jev-no-bullshit's plugins send,
+(pi/, opencode/) have no transcript file to name, so they send the context themselves,
 {"host", "session_id", "task", "actions", "earlier_actions", "conversation"}, plus the call:
 {"tool_name", "tool_input"}.
 """
@@ -45,7 +45,6 @@ JEV_TIMEOUT_SECONDS = 5.0
 # How long to wait for the harness to write the call being checked into its transcript (about 0.1 s).
 CALL_WAIT_SECONDS = 2.0
 DEFAULT_THRESHOLD = 0.65
-DEFAULT_MAX_DENIALS = 3
 
 # The call being checked: each part of its input is clipped to this many characters.
 PROPOSED_PART_CHARS = 2_000
@@ -386,6 +385,25 @@ def needs_check(tool: str, tool_input) -> bool:
     return name in EDIT_TOOLS
 
 
+# A command that may change something is first asked about on its own: read or write. Only the tool call is
+# sent. A read runs without the scope questions.
+WRITE_QUESTION = {
+    "writes": {
+        "type": "noul",
+        "instructions": (
+            "Does the command in `tool_call` write: change files, installed software, git history, running services, "
+            "or anything outside this machine, rather than only reading, searching, listing, or printing?"
+        ),
+    },
+}
+WRITE_BAR = 0.5
+
+
+def is_write(tool: str, tool_input, api_key: str, ask=None) -> bool:
+    response = (ask or ask_jev)({"tool_call": {"tool": tool, "input": tool_input}}, WRITE_QUESTION, api_key)
+    return noul_values(response).get("writes", 1.0) > WRITE_BAR
+
+
 # ---------------------------------------------------------------------------
 # Paths, settings and logging
 
@@ -440,39 +458,29 @@ def save_session(session_id: str, data: dict) -> None:
 
 def key_files() -> list[Path]:
     config = Path(os.environ.get("XDG_CONFIG_HOME", "").strip() or str(Path.home() / ".config"))
-    return [config / "jev-scope-control" / "env", config / "jev-no-bullshit" / "env"]
+    return [config / "jev-scope-control" / "env"]
 
 
-def key_from_file(path: Path, names: tuple[str, ...]) -> str:
+def key_from_file(path: Path) -> str:
     try:
         lines = path.read_text().splitlines()
     except OSError:
         return ""
-    for name in names:
-        for line in lines:
-            match = re.match(rf"\s*(?:export\s+)?{name}\s*=\s*(.*)$", line)
-            if match:
-                key = match.group(1).strip()
-                if len(key) >= 2 and key[0] == key[-1] and key[0] in "'\"":
-                    key = key[1:-1].strip()
-                if key:
-                    return key
+    for line in lines:
+        match = re.match(r"\s*(?:export\s+)?TYPESAFE_API_KEY\s*=\s*(.*)$", line)
+        if match:
+            key = match.group(1).strip()
+            if len(key) >= 2 and key[0] == key[-1] and key[0] in "'\"":
+                key = key[1:-1].strip()
+            if key:
+                return key
     return ""
 
 
 def api_key() -> str:
-    """This plugin's own key first, so its Jev usage can be tracked apart from other plugins.
-
-    JEV_SCOPE_CONTROL_API_KEY in the environment, then the key in ~/.config/jev-scope-control/env,
-    then the shared TYPESAFE_API_KEY in the environment, then ~/.config/jev-no-bullshit/env.
-    """
-    own_file, shared_file = key_files()
-    return (
-        os.environ.get("JEV_SCOPE_CONTROL_API_KEY", "").strip()
-        or key_from_file(own_file, ("JEV_SCOPE_CONTROL_API_KEY", "TYPESAFE_API_KEY"))
-        or os.environ.get("TYPESAFE_API_KEY", "").strip()
-        or key_from_file(shared_file, ("TYPESAFE_API_KEY",))
-    )
+    """TYPESAFE_API_KEY from ~/.config/jev-scope-control/env, this plugin's own, else from the environment."""
+    (own_file,) = key_files()
+    return key_from_file(own_file) or os.environ.get("TYPESAFE_API_KEY", "").strip()
 
 
 def number_setting(name: str, default: float, minimum: float, maximum: float, integer: bool = False) -> float:
@@ -489,8 +497,6 @@ def threshold() -> float:
     return number_setting("JEV_SCOPE_CONTROL_THRESHOLD", DEFAULT_THRESHOLD, 0.0, 1.0)
 
 
-def max_denials() -> int:
-    return int(number_setting("JEV_SCOPE_CONTROL_MAX_DENIALS", DEFAULT_MAX_DENIALS, 1, 1_000_000, integer=True))
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +578,7 @@ def wait_for_call(path: str | None, call_id: str | None, timeout: float = CALL_W
 
 
 def context(hook_input: dict, harness: str) -> tuple[str, list[dict], list[dict], list[dict], bool]:
-    """(task, actions, earlier actions, conversation, call found), read the way jev-no-bullshit reads them."""
+    """(task, actions, earlier actions, conversation, call found), read from the transcript."""
     if harness not in ("claude", "codex"):
         task, actions, _model, _pending, earlier = given_turn(hook_input)
         return task, actions, earlier, given_conversation(hook_input), True
@@ -585,7 +591,7 @@ def context(hook_input: dict, harness: str) -> tuple[str, list[dict], list[dict]
 
 
 def scope_state(task: str, actions: list[dict], earlier: list[dict], conversation: list[dict], tool: str, tool_input) -> tuple[dict, int]:
-    """jev-no-bullshit's state, whose summary is empty before the call runs, plus the call as `proposed_action`.
+    """The context state, whose summary is empty before the call runs, plus the call as `proposed_action`.
     Returns (state, actions dropped to fit)."""
     call = proposed(tool, tool_input)
     longest = max(question_tokens(q) for q in QUESTIONS.values())
@@ -599,11 +605,8 @@ def scope_state(task: str, actions: list[dict], earlier: list[dict], conversatio
 
 
 # ---------------------------------------------------------------------------
-# Context: reproduces how jev-no-bullshit reads the transcript and builds the state it sends to Jev.
-# Keep this identical to jev-no-bullshit; diverge only where a test shows its context does not work here.
+# Context: how the transcript is read and the state sent to Jev is built.
 
-# jev-no-bullshit's marker: its own hook messages in the transcript are recognized by it.
-NO_BULLSHIT_MARKER = "[jev-no-bullshit]"
 NO_RESULT = "(no result recorded)"
 # Earlier turns' actions back up claims about work done before the task message. More than this
 # many buries the current turn: on replayed checks, 50 earlier actions cut the scores of planted
@@ -1025,7 +1028,7 @@ _NOT_TYPED_PREFIXES = (
 
 def is_real_user_text(text: str) -> bool:
     stripped = text.strip()
-    if not stripped or NO_BULLSHIT_MARKER in stripped[:300]:
+    if not stripped:
         return False
     return not stripped.startswith(_NOT_TYPED_PREFIXES)
 
@@ -1291,30 +1294,13 @@ def hook_text(text: str) -> str | None:
     stripped = text.strip()
     if stripped.startswith("Stop hook feedback:"):
         return stripped[len("Stop hook feedback:") :].strip()  # its attachment copy names the hook
-    if stripped.startswith("The jev-no-bullshit plugin sent a message:"):
+    if re.match(r"The [\w.-]+ plugin sent a message:", stripped):  # Claude Code's wrapper for any plugin
         return stripped
     if stripped.startswith("<hook_prompt"):
         return re.sub(r"</?hook_prompt[^>]*>", "", stripped).strip()
-    if NO_BULLSHIT_MARKER in stripped[:300]:
-        return stripped
     return None
 
 _QUOTED_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
-
-
-def plugin_note(text: str) -> str:
-    """This plugin's earlier note cut to what it asked about. Its verdicts ("None of your actions show
-    this") were taken as evidence against the revision, raising true claims backed by tool output to
-    0.84; without the note, a reply saying it fixed "the flagged sentence" had nothing to refer to."""
-    items = []
-    for line in text.splitlines():
-        if not line.startswith("- "):
-            continue
-        kind = line[2:].split(":", 1)[0]
-        quoted = _QUOTED_RE.search(line)
-        items.append(f"{kind}: {quoted.group()}" if quoted else kind)
-    return f"{NO_BULLSHIT_MARKER} asked the assistant to double-check: " + "; ".join(items) if items else NO_BULLSHIT_MARKER
-
 
 
 def without_reply(messages: list[dict]) -> list[dict]:
@@ -1379,8 +1365,6 @@ def conversation_claude(entries: list[dict]) -> list[dict]:
         add(stamp, e["type"], text)
     ordered: list[dict] = []
     for _, m in sorted(messages.items(), key=lambda kv: kv[0][0]):
-        if m["role"] == "hook" and NO_BULLSHIT_MARKER in m["text"][:300]:
-            m = {**m, "text": plugin_note(m["text"])}
         if m["role"] == "hook" and ordered and ordered[-1]["role"] == "hook" and ordered[-1]["text"] == m["text"]:
             ordered[-1]["source"] = ordered[-1]["source"] or m["source"]
             continue
@@ -1648,7 +1632,7 @@ def given_conversation(hook_input: dict) -> list[dict]:
         {"role": str(m.get("role") or ""), "text": str(m.get("text") or "")}
         for m in messages if isinstance(m, dict) and str(m.get("text") or "").strip()
     ] if isinstance(messages, list) else []
-    return [{"role": "hook", "text": plugin_note(m["text"])} if NO_BULLSHIT_MARKER in m["text"][:300] else m for m in given]
+    return given
 
 
 # ---------------------------------------------------------------------------
@@ -1754,6 +1738,9 @@ def short_call(tool: str, tool_input) -> str:
     return one_line(f"{tool}: {stringify(tool_input)}", 100)
 
 
+DO_NOT_WORK_AROUND = "Do not work around this. If you believe the step is needed, stop and ask the user; otherwise continue with what was asked."
+
+
 def deny(reason: str, user_message: str) -> dict:
     return {
         "hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason},
@@ -1787,7 +1774,7 @@ def run(hook_input: dict) -> dict | None:
 
     key = api_key()
     if not key:
-        error = "TYPESAFE_API_KEY is not set, nor JEV_SCOPE_CONTROL_API_KEY, in this environment or in " + " or ".join(map(str, key_files()))
+        error = "TYPESAFE_API_KEY is not set in this environment or in " + " or ".join(map(str, key_files()))
         log({**base, "error": error})
         return warn_once(session, session_id, "no-key", error)
 
@@ -1798,14 +1785,30 @@ def run(hook_input: dict) -> dict | None:
         log({**base, "skipped": "no user request found"})
         return None
 
-    # Denials are counted per user request, so a wrong judgment can stall the work only so far.
-    request_key = hashlib.sha256(f"{len(conversation)}\0{task}".encode()).hexdigest()[:16]
-    if session.get("request") != request_key:
-        session = {**session, "request": request_key, "denials": 0}
-    limit = max_denials()
-    if session.get("denials", 0) >= limit:
-        log({**base, "skipped": f"denial cap of {limit} reached for this request"})
-        return None
+    # A denied call stays denied until the user's request changes: the same call again, however often, is denied
+    # without asking Jev. The denied calls are kept for the current request only.
+    task_key = hashlib.sha256(task.encode()).hexdigest()[:16]
+    call_key = hashlib.sha256(f"{tool}\0{json.dumps(tool_input, sort_keys=True)}".encode()).hexdigest()[:16]
+    if session.get("denied_for") != task_key:
+        session["denied_for"], session["denied_calls"] = task_key, []
+    denied_calls = list(session["denied_calls"])
+    if call_key in denied_calls:
+        log({**base, "denied": True, "repeat": True, "task": one_line(task, 300)})
+        return deny(
+            f"{MARKER} Denied: this {tool} call was already denied for this request. {DO_NOT_WORK_AROUND}",
+            f"jev-scope-control denied {short_call(tool, tool_input)} (already denied for this request)",
+        )
+
+    if (tool or "").lower() in SHELL_TOOLS:
+        try:
+            writes = is_write(tool, tool_input, key)
+        except (urllib.error.URLError, OSError, ValueError, TypeError) as error:
+            message = f"Jev call failed: {type(error).__name__}: {error}"
+            log({**base, "error": message})
+            return warn_once(session, session_id, "jev-error", message)
+        if not writes:
+            log({**base, "skipped": "read-only command"})
+            return None
 
     state, dropped = scope_state(task, actions, earlier, conversation, tool, tool_input)
     try:
@@ -1826,19 +1829,16 @@ def run(hook_input: dict) -> dict | None:
         log(entry)
         save_session(session_id, session)
         return None
-    session["denials"] = session.get("denials", 0) + 1
+    session["denied_calls"] = [*denied_calls, call_key]
     save_session(session_id, session)
-    entry["denials_this_request"] = session["denials"]
     log(entry)
     flagged.sort(key=lambda name: -scores[name])
     reason = "\n".join(
         [f"{MARKER} Denied: this {tool} call looks outside what the user asked for or agreed to."]
         + [f"- {FEEDBACK[name]}" for name in flagged]
-        + ["Do not work around this. If you believe the step is needed, stop and ask the user; otherwise continue with what was asked."]
+        + [DO_NOT_WORK_AROUND]
     )
     user_message = f"jev-scope-control denied {short_call(tool, tool_input)} ({', '.join(SHORT[n] for n in flagged)})"
-    if session["denials"] >= limit:
-        user_message += f"; that is {limit} denials for this request, so its remaining calls will not be checked"
     return deny(reason, user_message)
 
 

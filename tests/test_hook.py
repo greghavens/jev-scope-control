@@ -19,7 +19,7 @@ SCRIPT = ROOT / "jev-scope-control"
 sys.path.insert(0, str(ROOT / "tools"))
 from scope_questions import jsc  # noqa: E402
 
-IN_SCOPE = {name: 0.05 for name in jsc.QUESTIONS} | {"serves_request": 0.95}
+IN_SCOPE = {name: 0.05 for name in jsc.QUESTIONS} | {"serves_request": 0.95, "writes": 0.95}
 
 
 class StandIn(BaseHTTPRequestHandler):
@@ -122,7 +122,7 @@ class HookTest(unittest.TestCase):
         self.assertEqual(specific["permissionDecision"], "deny")
         self.assertTrue(specific["permissionDecisionReason"].startswith("[jev-scope-control] Denied"))
         self.assertIn(jsc.FEEDBACK["unasked_publish"], specific["permissionDecisionReason"])
-        self.assertIn("stop and ask the user", specific["permissionDecisionReason"])
+        self.assertIn("Do not work around this", specific["permissionDecisionReason"])
         self.assertIn("jev-scope-control denied Bash: git push", output["systemMessage"])
 
     def test_threshold_is_strict_and_configurable(self):
@@ -147,7 +147,7 @@ class HookTest(unittest.TestCase):
         self.server.values["against_instruction"] = 0.9
         self.assertIsNotNone(self.run_hook())
         self.server.values["approved_plan_step"] = 0.9
-        self.assertIsNone(self.run_hook())
+        self.assertIsNone(self.run_hook(tool_input={"file_path": "/p/login.ts", "old_string": "a", "new_string": "c"}))
 
     def test_building_on_what_the_user_rejected_is_denied(self):
         self.server.values["builds_on_rejected"] = 0.9
@@ -161,7 +161,7 @@ class HookTest(unittest.TestCase):
         self.assertEqual(len(self.server.requests), 1 + jsc.RESAMPLES)
         self.server.requests.clear()
         self.server.values["unasked_publish"] = 0.95  # far from the bar: one request
-        self.assertIsNotNone(self.run_hook())
+        self.assertIsNotNone(self.run_hook(tool_input={"file_path": "/p/login.ts", "old_string": "a", "new_string": "c"}))
         self.assertEqual(len(self.server.requests), 1)
 
     # --- state
@@ -177,7 +177,19 @@ class HookTest(unittest.TestCase):
     def test_shell_that_may_change_is_checked(self):
         for command in ("ls > files.txt", "rm -rf build", "echo $(curl x)", "git status; git push", "npm test"):
             self.run_hook("Bash", {"command": command})
-        self.assertEqual(len(self.server.requests), 5)
+        self.assertEqual(len(self.server.requests), 10)  # read/write, then scope
+
+    def test_a_command_jev_calls_a_read_gets_no_scope_questions(self):
+        self.server.values["writes"] = 0.1
+        self.server.values["unasked_publish"] = 0.9
+        self.assertIsNone(self.run_hook("Bash", {"command": "python3 -c 'print(open(\"x\").read())'"}))
+        self.assertEqual(len(self.server.requests), 1)
+        self.assertEqual(self.server.requests[0]["body"]["state"],
+                         {"tool_call": {"tool": "Bash", "input": {"command": "python3 -c 'print(open(\"x\").read())'"}}})
+        self.assertEqual(set(self.server.requests[0]["body"]["questions"]), {"writes"})
+        self.server.values["writes"] = 0.9
+        self.assertIsNotNone(self.run_hook("Bash", {"command": "python3 -c 'print(open(\"x\").read())'"}))
+        self.assertEqual(len(self.server.requests), 3)
 
     def test_only_exec_write_and_edit_tools_are_checked(self):
         self.run_hook("mcp__github__create_issue", {"title": "x"})
@@ -190,7 +202,7 @@ class HookTest(unittest.TestCase):
 
     # --- state
 
-    def test_state_is_what_jev_no_bullshit_sends_plus_the_call(self):
+    def test_state_is_the_context_plus_the_call(self):
         claude_transcript(self.transcript, "Now fix the login bug too.",
                           [("t0", "Read", {"file_path": "/p/login.ts"}), ("t1", "Edit", {"file_path": "/p/login.ts"})],
                           earlier=[("user", "Add a signup form."), ("assistant", "Done: signup form added.")])
@@ -207,32 +219,12 @@ class HookTest(unittest.TestCase):
         self.assertEqual(set(self.server.requests[0]["body"]["questions"]), set(jsc.QUESTIONS))
         self.assertEqual(self.server.requests[0]["auth"], "Bearer test-key")
 
-    def test_the_context_matches_jev_no_bullshit(self):
-        """The reproduced context code builds the same state as jev-no-bullshit's own, when it is checked out here."""
-        upstream = ROOT.parent / "jev-no-bullshit" / "jev-no-bullshit"
-        if not upstream.exists():
-            self.skipTest("jev-no-bullshit is not checked out next to this repo")
-        loader = importlib.machinery.SourceFileLoader("jnb_reference", str(upstream))
-        spec = importlib.util.spec_from_loader("jnb_reference", loader)
-        jnb = importlib.util.module_from_spec(spec)
-        loader.exec_module(jnb)
-        claude_transcript(self.transcript, "Now fix the login bug too.",
-                          [("t0", "Read", {"file_path": "/p/login.ts"}), ("t1", "Edit", {"file_path": "/p/login.ts"})],
-                          earlier=[("user", "Add a signup form."), ("assistant", "Done: signup form added.")])
-        for mod in (jsc, jnb):
-            entries = mod.read_jsonl(str(self.transcript))
-            task, actions, _model, earlier = mod.parse_claude(entries)
-            built = mod.build_state(task, actions, "", 20_000, earlier, mod.conversation_claude(entries))
-            if mod is jsc:
-                ours = built
-        self.assertEqual(json.dumps(ours), json.dumps(built))
-
     def test_codex_rollout(self):
         codex_rollout(self.transcript, "Rename the flag to --dry-run.", [("c1", "exec_command", json.dumps({"cmd": "sed -i s/x/y/ cli.py"}))])
         self.server.values["unrelated_target"] = 0.9
         output = self.run_hook("exec_command", {"cmd": "sed -i s/x/y/ cli.py"}, turn_id="turn-1", tool_use_id="c1")
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertEqual(self.server.requests[0]["body"]["state"]["task"], "Rename the flag to --dry-run.")
+        self.assertEqual(self.server.requests[-1]["body"]["state"]["task"], "Rename the flag to --dry-run.")
         self.assertEqual(self.log()[-1]["harness"], "codex")
 
     def test_pi_and_opencode_send_the_turn(self):
@@ -261,19 +253,33 @@ class HookTest(unittest.TestCase):
         self.assertIsNone(self.run_hook())
         self.assertEqual(self.server.requests, [])
 
-    # --- cap
+    # --- repeats
 
-    def test_denials_are_capped_per_request(self):
+    def test_a_denied_call_stays_denied_until_the_request_changes(self):
         self.server.values["unasked_publish"] = 0.9
-        self.env["JEV_SCOPE_CONTROL_MAX_DENIALS"] = "2"
         self.assertIsNotNone(self.run_hook("Bash", {"command": "git push"}))
-        last = self.run_hook("Bash", {"command": "git push"})
-        self.assertIn("2 denials for this request", last["systemMessage"])
-        self.assertIsNone(self.run_hook("Bash", {"command": "git push"}))
         self.assertEqual(len(self.server.requests), 2)
-        # A new request resets the count.
-        claude_transcript(self.transcript, "Now push it.", [("t1", "Bash", {"command": "git push"})])
+        self.server.values["unasked_publish"] = 0.05  # Jev is not asked again: the repeat is denied as is
+        again = self.run_hook("Bash", {"command": "git push"})
+        self.assertIn("already denied for this request", again["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertEqual(len(self.server.requests), 2)
+        self.assertTrue(self.log()[-1]["repeat"])
+        for _ in range(3):  # however many times it is retried
+            self.assertIsNotNone(self.run_hook("Bash", {"command": "git push"}))
+        for n in range(25):  # and however many other calls are denied in between
+            self.server.values["unasked_publish"] = 0.9
+            self.run_hook("Bash", {"command": f"git push {n}"})
+        self.server.values["unasked_publish"] = 0.05
+        self.server.requests.clear()
         self.assertIsNotNone(self.run_hook("Bash", {"command": "git push"}))
+        self.assertEqual(self.server.requests, [])
+        # A different call is checked as usual.
+        self.assertIsNone(self.run_hook("Bash", {"command": "git push --tags"}))
+        self.assertEqual(len(self.server.requests), 2)
+        # A new request from the user: the same call is checked again.
+        claude_transcript(self.transcript, "Push the fix to origin.", [("t1", "Bash", {"command": "git push"})])
+        self.assertIsNone(self.run_hook("Bash", {"command": "git push"}))
+        self.assertEqual(len(self.server.requests), 4)
 
     # --- fail open
 
@@ -286,18 +292,14 @@ class HookTest(unittest.TestCase):
 
     def test_key_file_is_used(self):
         del self.env["TYPESAFE_API_KEY"]
-        (self.tmp / "config" / "jev-no-bullshit").mkdir(parents=True)
-        (self.tmp / "config" / "jev-no-bullshit" / "env").write_text('export TYPESAFE_API_KEY="from-file"\n')
+        (self.tmp / "config" / "jev-scope-control").mkdir(parents=True)
+        (self.tmp / "config" / "jev-scope-control" / "env").write_text('export TYPESAFE_API_KEY="from-file"\n')
         self.run_hook()
         self.assertEqual(self.server.requests[0]["auth"], "Bearer from-file")
 
-    def test_this_plugins_own_key_comes_before_the_shared_one(self):
-        self.env["JEV_SCOPE_CONTROL_API_KEY"] = "own-env"
-        self.run_hook()
-        self.assertEqual(self.server.requests[-1]["auth"], "Bearer own-env")
-        del self.env["JEV_SCOPE_CONTROL_API_KEY"]
+    def test_this_plugins_key_file_comes_before_the_environment(self):
         (self.tmp / "config" / "jev-scope-control").mkdir(parents=True)
-        (self.tmp / "config" / "jev-scope-control" / "env").write_text("JEV_SCOPE_CONTROL_API_KEY=own-file\n")
+        (self.tmp / "config" / "jev-scope-control" / "env").write_text("TYPESAFE_API_KEY=own-file\n")
         self.run_hook()
         self.assertEqual(self.server.requests[-1]["auth"], "Bearer own-file")
 

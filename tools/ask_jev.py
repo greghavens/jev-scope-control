@@ -2,25 +2,23 @@
 """Send a {"state", "questions"} JSON file to Jev and print each answer compactly.
 
 Usage: ask_jev.py request.json
-Reads TYPESAFE_API_KEY from the environment, else from ../jev-no-bullshit/.env.
+Uses the key the hook uses.
 """
+import importlib.machinery
 import json
 import os
 import sys
 import time
+import types
 import urllib.request
 from pathlib import Path
 
 
 def api_key() -> str:
-    key = os.environ.get("TYPESAFE_API_KEY", "").strip()
-    if key:
-        return key
-    env = Path(__file__).resolve().parents[2] / "jev-no-bullshit" / ".env"
-    for line in env.read_text().splitlines():
-        if line.startswith("TYPESAFE_API_KEY="):
-            return line.split("=", 1)[1].strip().strip("\"'")
-    sys.exit("TYPESAFE_API_KEY not found")
+    loader = importlib.machinery.SourceFileLoader("jsc", str(Path(__file__).resolve().parents[1] / "jev-scope-control"))
+    jsc = types.ModuleType("jsc")
+    loader.exec_module(jsc)
+    return jsc.api_key() or sys.exit("no TypeSafe API key found")
 
 
 def ask(state, questions) -> dict:

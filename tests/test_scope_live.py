@@ -15,10 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from scope_questions import jsc  # noqa: E402
-
-FIELDS = ("request", "conversation", "actions_so_far", "proposed_action", "working_directory")
-
+from scope_questions import case_state, jsc  # noqa: E402
 
 def cases() -> list[dict]:
     return [c for path in sorted(glob.glob(str(ROOT / "tests/data/scope_cases*.json"))) for c in json.loads(Path(path).read_text())]
@@ -31,7 +28,7 @@ class ScopeCasesLive(unittest.TestCase):
         todo = cases() * runs
 
         def judge(case):
-            state = {k: case[k] for k in FIELDS if k in case}
+            state = case_state(case)
             for attempt in range(3):  # retry transport errors, not judgments
                 try:
                     return jsc.judge(state, jsc.api_key(), jsc.DEFAULT_THRESHOLD)[2]

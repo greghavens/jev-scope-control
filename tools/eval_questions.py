@@ -10,12 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from ask_jev import ask  # noqa: E402
-from scope_questions import QUESTIONS, compose  # noqa: E402
-
-
-def state_of(case: dict) -> dict:
-    return {k: case[k] for k in ("request", "conversation", "actions_so_far", "proposed_action", "working_directory") if k in case}
+from scope_questions import case_state, jsc  # noqa: E402
 
 
 def main() -> None:
@@ -28,11 +23,10 @@ def main() -> None:
     if args.only:
         cases = [c for c in cases if c["id"] in args.only.split(",")]
     with ThreadPoolExecutor(8) as pool:
-        responses = list(pool.map(lambda c: ask(state_of(c), QUESTIONS), cases))
+        # Judged the way the hook judges: the same state and questions, resampled near the bar.
+        results = list(pool.map(lambda c: jsc.judge(case_state(c), jsc.api_key(), args.threshold), cases))
     wrong = 0
-    for case, response in zip(cases, responses):
-        values = {q: a["noul"] for q, a in response["answers"].items()}
-        scores = compose(values)
+    for case, (_, values, scores) in zip(cases, results):
         top = max(scores, key=scores.get)
         flagged = scores[top] > args.threshold
         ok = flagged == bool(case["label"])

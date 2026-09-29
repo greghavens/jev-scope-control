@@ -1,6 +1,5 @@
-// opencode's half of jev-scope-control. Before a tool runs, send the call, the
-// person's last message, the conversation and the calls since that message to
-// the Python script, which asks Jev whether the call is within what the person
+// opencode's half of jev-scope-control. Before a tool runs, send the call and
+// the context jev-no-bullshit's opencode plugin sends to the Python script, which asks Jev whether the call is within what the person
 // asked for or agreed to. A denied call is stopped by throwing the script's
 // reason, which the model sees as the tool's error.
 import { spawn } from "node:child_process"
@@ -10,10 +9,11 @@ import type { Plugin } from "@opencode-ai/plugin"
 const SCRIPT = fileURLToPath(new URL("../jev-scope-control", import.meta.url))
 // Above the script's 5 s Jev timeout, so the script fails open by itself.
 const TIMEOUT_MS = 15_000
+const NO_BULLSHIT_TAG = "[jev-no-bullshit]"
 
 type Part = { type: string; text?: string; synthetic?: boolean; tool?: string; callID?: string; state?: any }
 type Message = { info: { id: string; role: string }; parts: Part[] }
-type Call = { tool: string; input: unknown; result: string | null }
+type Call = { tool: string; input: unknown; result: string | null; error: boolean }
 
 function text(parts: Part[]): string {
   return parts
@@ -24,8 +24,12 @@ function text(parts: Part[]): string {
 
 function call(part: Part): Call {
   const state = part.state ?? {}
-  const result = state.status === "completed" ? String(state.output ?? "") : state.status === "error" ? String(state.error ?? "") : null
-  return { tool: part.tool ?? "unknown", input: state.input ?? {}, result }
+  let result = state.status === "completed" ? String(state.output ?? "") : state.status === "error" ? String(state.error ?? "") : null
+  // The shell tool reports a failed command as completed; its exit code is only in the metadata.
+  const exit = state.metadata?.exit
+  const failed = typeof exit === "number" && exit !== 0
+  if (failed && result !== null) result = `${result.replace(/\n+$/, "")}\nExit code: ${exit}`
+  return { tool: part.tool ?? "unknown", input: state.input ?? {}, result, error: state.status === "error" || failed }
 }
 
 // Run the script with the call on stdin. Resolves its stdout, or "" on any failure: the check fails open.
@@ -41,11 +45,11 @@ function check(input: object): Promise<string> {
   })
 }
 
-export const JevScopeControl: Plugin = async ({ client, directory }) => {
+export const JevScopeControl: Plugin = async ({ client }) => {
   const messagesOf = async (id: string) => ((await client.session.messages({ path: { id } })).data ?? []) as Message[]
 
   // The deny reason when the script denies the call, else "". Never throws.
-  async function review(tool: string, sessionID: string, callID: string, args: unknown): Promise<string> {
+  async function review(tool: string, sessionID: string, args: unknown): Promise<string> {
     try {
       // A subagent works for the person's request too: the scope comes from the root session.
       let rootID = sessionID
@@ -55,33 +59,30 @@ export const JevScopeControl: Plugin = async ({ client, directory }) => {
         rootID = parent
       }
       const root = await messagesOf(rootID)
+      // From here on, what jev-no-bullshit's opencode plugin sends. The task is the person's last prompt;
+      // jev-no-bullshit's feedback prompts start with its tag.
       let taskIndex = -1
       for (let i = root.length - 1; i >= 0; i--) {
-        if (root[i].info.role === "user" && text(root[i].parts).trim()) {
+        const prompt = text(root[i].parts).trim()
+        if (root[i].info.role === "user" && prompt && !prompt.startsWith(NO_BULLSHIT_TAG)) {
           taskIndex = i
           break
         }
       }
-      if (taskIndex < 0) return ""
+      const calls = (messages: Message[]) =>
+        messages.filter((m) => m.info.role === "assistant").flatMap((m) => m.parts.filter((p) => p.type === "tool").map(call))
 
-      // The calls made for this request: in the root session, those since the request; in a subagent, all of its own.
-      const own = rootID === sessionID ? root.slice(taskIndex + 1) : await messagesOf(sessionID)
-      const actions = own
-        .filter((m) => m.info.role === "assistant")
-        .flatMap((m) => m.parts.filter((p) => p.type === "tool" && p.callID !== callID).map(call))
-
+      // In a subagent, the calls since the task are its own.
       const stdout = await check({
         host: "opencode",
         session_id: `opencode-${rootID}`,
         ...(rootID !== sessionID ? { agent_id: sessionID } : {}),
-        cwd: directory,
+        task: taskIndex >= 0 ? text(root[taskIndex].parts) : "",
+        actions: calls(rootID === sessionID ? root.slice(taskIndex + 1) : await messagesOf(sessionID)),
+        earlier_actions: calls(root.slice(0, Math.max(taskIndex, 0))),
+        conversation: root.map((m) => ({ role: m.info.role, text: text(m.parts) })).filter((m) => m.text.trim()),
         tool_name: tool,
         tool_input: args,
-        task: text(root[taskIndex].parts),
-        conversation: root
-          .slice(0, taskIndex)
-          .map((m) => ({ role: m.info.role, text: text(m.parts) })),
-        actions,
       })
       const decision = (stdout.trim() ? JSON.parse(stdout) : {}).hookSpecificOutput
       if (decision?.permissionDecision === "deny" && typeof decision.permissionDecisionReason === "string") {
@@ -95,7 +96,7 @@ export const JevScopeControl: Plugin = async ({ client, directory }) => {
 
   return {
     "tool.execute.before": async (input, output) => {
-      const reason = await review(input.tool, input.sessionID, input.callID, output.args)
+      const reason = await review(input.tool, input.sessionID, output.args)
       if (reason) throw new Error(reason)
     },
   }

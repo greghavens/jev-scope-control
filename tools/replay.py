@@ -72,12 +72,13 @@ def codex_files() -> list[str]:
 
 def judge(point: dict) -> dict:
     entries, n, block = point["entries"], point["index"], point["block"]
-    parse = jsc.parse_codex if point.get("codex") else jsc.parse_claude
-    request, conversation, actions = parse(entries[: n + 1], block["id"])
+    parse, conversation = (jsc.parse_codex, jsc.conversation_codex) if point.get("codex") else (jsc.parse_claude, jsc.conversation_claude)
+    before = entries[: n + 1]
+    request, actions, _model, earlier = parse(before)
     base = {"session": point["session"], "tool": block["name"], "call": jsc.short_call(block["name"], block["input"])}
     if not request:
         return {**base, "skipped": "no request"}
-    state = jsc.build_state(request, conversation, actions, block["name"], block["input"], point["cwd"])
+    state, _ = jsc.scope_state(request, actions, earlier, conversation(before), block["name"], block["input"])
     try:
         _, values, scores = jsc.judge(state, jsc.api_key(), jsc.DEFAULT_THRESHOLD)
     except Exception as error:

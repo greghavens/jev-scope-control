@@ -1,7 +1,6 @@
-// pi's half of jev-scope-control. Before a tool runs, send the call, the
-// person's last message, the conversation and the calls since that message to
-// the Python script, which asks Jev whether the call is within what the person
-// asked for or agreed to. A denied call is blocked with the script's reason,
+// pi's half of jev-scope-control. Before a tool runs, send the call and the
+// context jev-no-bullshit's pi plugin sends to the Python script, which asks
+// Jev whether the call is within what the person asked for or agreed to. A denied call is blocked with the script's reason,
 // which the model sees as the tool's result.
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
@@ -10,8 +9,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 const SCRIPT = fileURLToPath(new URL("../jev-scope-control", import.meta.url))
 // Above the script's 5 s Jev timeout, so the script fails open by itself.
 const TIMEOUT_MS = 15_000
+const NO_BULLSHIT_TAG = "[jev-no-bullshit]"
 
-type Call = { tool: string; input: unknown; result: string | null }
+type Call = { tool: string; input: unknown; result: string | null; error: boolean; now: boolean }
 
 function text(content: unknown): string {
   if (typeof content === "string") return content
@@ -39,52 +39,57 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     // pi blocks the call when a handler throws, so nothing here may.
     try {
-      type Message = { role: string; content?: unknown; toolCallId?: string; customType?: string }
-      const messages: Message[] = []
+      // The same messages jev-no-bullshit reads: the branch's messages, with its hook messages as "custom".
+      const messages: { role: string; content?: unknown; toolCallId?: string; isError?: boolean }[] = []
       for (const entry of ctx.sessionManager.getBranch()) {
-        if (entry.type === "message") messages.push(entry.message as Message)
-        else if (entry.type === "compaction") messages.push({ role: "summary", content: entry.summary })
+        if (entry.type === "message") messages.push(entry.message as (typeof messages)[number])
+        else if (entry.type === "custom_message") messages.push({ role: "custom", content: entry.content })
       }
 
-      // The request is the person's last message; the calls since it are what the model has done for it.
+      // From here on, what jev-no-bullshit's pi plugin sends. The task is the person's last message;
+      // jev-no-bullshit's feedback goes in as custom messages, so it is not one.
       let taskIndex = -1
       for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === "user" && text(messages[i].content).trim()) {
+        const m = messages[i]
+        if (m.role === "user" && text(m.content).trim() && !text(m.content).trimStart().startsWith(NO_BULLSHIT_TAG)) {
           taskIndex = i
           break
         }
       }
-      if (taskIndex < 0) return
 
       const calls: Call[] = []
       const byId = new Map<string, Call>()
-      messages.slice(taskIndex + 1).forEach((message) => {
+      messages.forEach((message, i) => {
         if (message.role === "assistant" && Array.isArray(message.content)) {
           for (const block of message.content) {
-            if (block?.type !== "toolCall" || block.id === event.toolCallId) continue
-            const call = { tool: block.name, input: block.arguments, result: null }
+            if (block?.type !== "toolCall") continue
+            const call = { tool: block.name, input: block.arguments, result: null, error: false, now: i > taskIndex }
             calls.push(call)
             byId.set(block.id, call)
           }
         } else if (message.role === "toolResult") {
           const call = byId.get(message.toolCallId ?? "")
-          if (call) call.result = text(message.content)
+          if (call) {
+            call.result = text(message.content)
+            call.error = Boolean(message.isError)
+          }
         }
       })
+      const strip = ({ now: _, ...call }: Call) => call
 
       const stdout = await check(
         {
           host: "pi",
           session_id: `pi-${ctx.sessionManager.getSessionId()}`,
-          cwd: ctx.cwd,
+          task: taskIndex >= 0 ? text(messages[taskIndex].content) : "",
+          actions: calls.filter((c) => c.now).map(strip),
+          earlier_actions: calls.filter((c) => !c.now).map(strip),
+          conversation: messages
+            .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "custom")
+            .map((m) => ({ role: m.role === "custom" ? "hook" : m.role, text: text(m.content) }))
+            .filter((m) => m.text.trim()),
           tool_name: event.toolName,
           tool_input: event.input,
-          task: text(messages[taskIndex].content),
-          conversation: messages
-            .slice(0, taskIndex)
-            .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "summary")
-            .map((m) => ({ role: m.role, text: text(m.content) })),
-          actions: calls,
         },
         ctx.signal,
       )

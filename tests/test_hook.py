@@ -2,6 +2,8 @@
 
     python3 -m unittest discover -s tests
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import subprocess
@@ -17,7 +19,7 @@ SCRIPT = ROOT / "jev-scope-control"
 sys.path.insert(0, str(ROOT / "tools"))
 from scope_questions import jsc  # noqa: E402
 
-IN_SCOPE = {name: 0.05 for name in jsc.QUESTIONS} | {"serves_request": 0.95, "makes_change": 0.95, "request_directs_work": 0.95}
+IN_SCOPE = {name: 0.05 for name in jsc.QUESTIONS} | {"serves_request": 0.95}
 
 
 class StandIn(BaseHTTPRequestHandler):
@@ -129,36 +131,11 @@ class HookTest(unittest.TestCase):
         self.env["JEV_SCOPE_CONTROL_THRESHOLD"] = "0.5"
         self.assertIsNotNone(self.run_hook("Bash", {"command": "git push"}))
 
-    def test_question_only_needs_a_change(self):
-        self.server.values["request_is_question"] = 0.9
-        self.assertIsNotNone(self.run_hook())
-        self.server.values["makes_change"] = 0.1
-        self.assertIsNone(self.run_hook("Bash", {"command": "npm test"}))
-
-    def test_extra_work_alone_does_not_deny_when_the_call_serves_the_request(self):
-        self.server.values["beyond_request"] = 0.9
+    def test_extra_behavior_denies_only_when_beyond_request_agrees(self):
         self.server.values["extra_behavior"] = 0.9
-        self.assertIsNone(self.run_hook())  # the request was not judged bounded
-        self.server.values["bounded_request"] = 0.9
-        self.assertIsNotNone(self.run_hook())
-
-    def test_a_requested_write_up_is_not_a_change_after_a_question(self):
-        self.server.values["request_is_question"] = 0.9
-        self.assertIsNotNone(self.run_hook())
-        self.server.values["writes_up_answer"] = 0.9
         self.assertIsNone(self.run_hook())
-
-    def test_other_task_needs_both_latest_and_earlier_to_miss(self):
-        self.server.values["serves_request"] = 0.1
-        self.server.values["finishes_earlier"] = 0.9
-        self.assertIsNone(self.run_hook())
-        self.server.values["finishes_earlier"] = 0.1
+        self.server.values["beyond_request"] = 0.9  # excused on its own, since the call serves the request
         self.assertIsNotNone(self.run_hook())
-
-    def test_a_complaint_that_asks_for_nothing_names_no_other_task(self):
-        self.server.values["serves_request"] = 0.1
-        self.server.values["request_directs_work"] = 0.1
-        self.assertIsNone(self.run_hook())
 
     def test_extra_work_is_excused_by_unfinished_earlier_work(self):
         self.server.values.update(beyond_request=0.9, serves_request=0.1, finishes_earlier=0.9)
@@ -172,11 +149,11 @@ class HookTest(unittest.TestCase):
         self.server.values["approved_plan_step"] = 0.9
         self.assertIsNone(self.run_hook())
 
-    def test_a_banned_action_is_denied_even_when_it_changes_nothing(self):
-        self.server.values.update(against_instruction=0.9, makes_change=0.1)
-        self.assertIsNone(self.run_hook())  # a limit on changing things does not reach a call that changes nothing
-        self.server.values["forbids_this_act"] = 0.9
-        self.assertIsNotNone(self.run_hook())  # "leave the agent alive", then closing it
+    def test_building_on_what_the_user_rejected_is_denied(self):
+        self.server.values["builds_on_rejected"] = 0.9
+        out = self.run_hook()
+        self.assertIsNotNone(out)
+        self.assertIn("rejected", json.dumps(out))
 
     def test_near_the_bar_the_call_is_resampled_and_averaged(self):
         self.server.values["unasked_publish"] = 0.68
@@ -187,21 +164,7 @@ class HookTest(unittest.TestCase):
         self.assertIsNotNone(self.run_hook())
         self.assertEqual(len(self.server.requests), 1)
 
-    def test_a_question_request_is_not_another_task(self):
-        self.server.values["serves_request"] = 0.1
-        self.server.values["finishes_earlier"] = 0.1
-        self.server.values["request_is_question"] = 0.5  # below the bar for question_only, and it names no task
-        self.assertIsNone(self.run_hook())
-
     # --- state
-
-    def test_the_plan_being_approved_is_kept_whole_and_old_turns_are_dropped_first(self):
-        plan = "Full plan: " + "step. " * 800
-        conversation = [{"role": "assistant", "text": "old " * 3000}] * 12 + [{"role": "user", "text": "plan only"}, {"role": "assistant", "text": plan}]
-        fitted = jsc.fit_conversation(conversation)
-        self.assertEqual(fitted[-1]["text"], plan)
-        self.assertEqual(fitted[-2]["text"], "plan only")
-        self.assertLessEqual(sum(len(m["text"]) for m in fitted), jsc.CONVERSATION_CHARS)
 
     # --- gating
 
@@ -216,32 +179,60 @@ class HookTest(unittest.TestCase):
             self.run_hook("Bash", {"command": command})
         self.assertEqual(len(self.server.requests), 5)
 
-    def test_unknown_and_mcp_tools_are_checked(self):
+    def test_only_exec_write_and_edit_tools_are_checked(self):
         self.run_hook("mcp__github__create_issue", {"title": "x"})
-        self.assertEqual(len(self.server.requests), 1)
+        self.run_hook("WebFetch", {"url": "https://example.com"})
+        self.run_hook("TodoWrite", {"todos": []})
+        self.assertEqual(self.server.requests, [])
+        for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"):
+            self.run_hook(tool, {"file_path": "/p/login.ts"})
+        self.assertEqual(len(self.server.requests), 5)
 
     # --- state
 
-    def test_state_carries_request_conversation_actions_and_call(self):
+    def test_state_is_what_jev_no_bullshit_sends_plus_the_call(self):
         claude_transcript(self.transcript, "Now fix the login bug too.",
                           [("t0", "Read", {"file_path": "/p/login.ts"}), ("t1", "Edit", {"file_path": "/p/login.ts"})],
                           earlier=[("user", "Add a signup form."), ("assistant", "Done: signup form added.")])
         self.run_hook()
-        state = self.server.requests[0]["body"]["state"]
-        self.assertEqual(state["request"], "Now fix the login bug too.")
-        self.assertEqual([m["text"] for m in state["conversation"]], ["Add a signup form.", "Done: signup form added.", "Now fix the login bug too."])
-        self.assertEqual([a["tool"] for a in state["actions_so_far"]], ["Read"])  # the call being judged is not an action so far
-        self.assertEqual(state["proposed_action"]["tool"], "Edit")
-        self.assertEqual(state["working_directory"], "/p")
+        state = dict(self.server.requests[0]["body"]["state"])
+        self.assertEqual(state.pop("proposed_action")["tool"], "Edit")
+        entries = jsc.read_jsonl(str(self.transcript))
+        task, actions, _model, earlier = jsc.parse_claude(entries)
+        expected, _ = jsc.scope_state(task, actions, earlier, jsc.conversation_claude(entries), "Edit", {"file_path": "/p/login.ts"})
+        expected.pop("proposed_action")
+        self.assertEqual(json.dumps(state), json.dumps(expected))  # byte for byte
+        self.assertEqual(state["task"], "Now fix the login bug too.")
+        self.assertEqual(state["summary"], "")
         self.assertEqual(set(self.server.requests[0]["body"]["questions"]), set(jsc.QUESTIONS))
         self.assertEqual(self.server.requests[0]["auth"], "Bearer test-key")
+
+    def test_the_context_matches_jev_no_bullshit(self):
+        """The reproduced context code builds the same state as jev-no-bullshit's own, when it is checked out here."""
+        upstream = ROOT.parent / "jev-no-bullshit" / "jev-no-bullshit"
+        if not upstream.exists():
+            self.skipTest("jev-no-bullshit is not checked out next to this repo")
+        loader = importlib.machinery.SourceFileLoader("jnb_reference", str(upstream))
+        spec = importlib.util.spec_from_loader("jnb_reference", loader)
+        jnb = importlib.util.module_from_spec(spec)
+        loader.exec_module(jnb)
+        claude_transcript(self.transcript, "Now fix the login bug too.",
+                          [("t0", "Read", {"file_path": "/p/login.ts"}), ("t1", "Edit", {"file_path": "/p/login.ts"})],
+                          earlier=[("user", "Add a signup form."), ("assistant", "Done: signup form added.")])
+        for mod in (jsc, jnb):
+            entries = mod.read_jsonl(str(self.transcript))
+            task, actions, _model, earlier = mod.parse_claude(entries)
+            built = mod.build_state(task, actions, "", 20_000, earlier, mod.conversation_claude(entries))
+            if mod is jsc:
+                ours = built
+        self.assertEqual(json.dumps(ours), json.dumps(built))
 
     def test_codex_rollout(self):
         codex_rollout(self.transcript, "Rename the flag to --dry-run.", [("c1", "exec_command", json.dumps({"cmd": "sed -i s/x/y/ cli.py"}))])
         self.server.values["unrelated_target"] = 0.9
         output = self.run_hook("exec_command", {"cmd": "sed -i s/x/y/ cli.py"}, turn_id="turn-1", tool_use_id="c1")
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertEqual(self.server.requests[0]["body"]["state"]["request"], "Rename the flag to --dry-run.")
+        self.assertEqual(self.server.requests[0]["body"]["state"]["task"], "Rename the flag to --dry-run.")
         self.assertEqual(self.log()[-1]["harness"], "codex")
 
     def test_pi_and_opencode_send_the_turn(self):
@@ -251,8 +242,8 @@ class HookTest(unittest.TestCase):
                                actions=[{"tool": "read", "input": "README.md", "result": "..."}])
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
         state = self.server.requests[0]["body"]["state"]
-        self.assertEqual(state["request"], "Only update the README.")
-        self.assertEqual(state["actions_so_far"][0]["tool"], "read")
+        self.assertEqual(state["task"], "Only update the README.")
+        self.assertEqual(state["actions"][0]["tool"], "read")
 
     def test_waits_for_a_call_the_harness_writes_after_the_hook_starts(self):
         claude_transcript(self.transcript, "Login fails for uppercase emails. Fix it.", [])

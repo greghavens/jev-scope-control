@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
@@ -46,7 +47,7 @@ OPENCODE_BIN = find("OPENCODE_BIN", "opencode", MOONSHINER / "opencode/node_modu
 def scope_answer(qid, body):
     """Jev stand-in: the task's command serves the request; the other one pushes unasked."""
     proposed = json.dumps(body["state"]["proposed_action"])
-    if qid in ("serves_request", "makes_change"):
+    if qid == "serves_request":
         return 0.95
     if qid == "unasked_publish" and "PUSHED" in proposed:
         return 0.95
@@ -101,12 +102,14 @@ class _E2EBase(unittest.TestCase):
         # What Jev saw, built from the CLI's own session: the task, and the first call as done.
         self.assertEqual(self.jev.schema_errors, [])
         first, second = (c["body"]["state"] for c in self.jev.calls)
-        self.assertEqual(first["request"], TASK)
+        self.assertEqual(first["task"], TASK)
         self.assertIn(IN_SCOPE_COMMAND, json.dumps(first["proposed_action"]))
-        self.assertEqual(second["request"], TASK)
+        self.assertEqual(second["task"], TASK)
         self.assertIn(OUT_OF_SCOPE_COMMAND, json.dumps(second["proposed_action"]))
-        self.assertEqual(len(second["actions_so_far"]), 1, second["actions_so_far"])
-        self.assertIn(IN_SCOPE_COMMAND, json.dumps(second["actions_so_far"][0]))
+        # jev-no-bullshit's context: the first call as done; the pending call, where the transcript has it, with no result.
+        done = [a for a in second["actions"] if a["result"] != "(no result recorded)"]
+        self.assertEqual(len(done), 1, second["actions"])
+        self.assertIn(IN_SCOPE_COMMAND, json.dumps(done[0]))
 
         # The model got the reason as the denied call's result.
         self.assertTrue(reply.startswith(REPLY), reply)
@@ -240,8 +243,13 @@ class OpencodeE2E(_E2EBase):
         self.base = f"http://127.0.0.1:{port}"
         self.server = subprocess.Popen(
             [OPENCODE_BIN, "serve", "--port", str(port), "--hostname", "127.0.0.1"], cwd=self.work, env=self.env,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
+        # A request sent while opencode is still starting can hang for good, so wait until it says it listens.
+        for line in self.server.stdout:
+            if "listening on" in line:
+                break
+        threading.Thread(target=self.server.stdout.read, daemon=True).start()
 
     def tearDown(self):
         self.server.terminate()
@@ -249,12 +257,12 @@ class OpencodeE2E(_E2EBase):
         self.model.close()
         super().tearDown()
 
-    def api(self, method, path, body=None):
+    def api(self, method, path, body=None, timeout=120):
         request = urllib.request.Request(
             f"{self.base}{path}?directory={self.work}", method=method, headers={"Content-Type": "application/json"},
             data=json.dumps(body).encode() if body is not None else None,
         )
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
             return json.loads(raw) if raw else None
 
@@ -262,7 +270,7 @@ class OpencodeE2E(_E2EBase):
         deadline = time.monotonic() + 30
         while True:
             try:
-                session = self.api("POST", "/session", {})
+                session = self.api("POST", "/session", {}, timeout=15)
                 break
             except OSError:
                 if time.monotonic() > deadline:

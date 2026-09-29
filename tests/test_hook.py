@@ -213,6 +213,21 @@ class HookTest(unittest.TestCase):
         notes = [m for m in state["conversation"] if "Double-check" in m["text"] or "double-check" in m["text"]]
         self.assertTrue(notes and all(m["role"] == "hook" for m in notes), state["conversation"])
 
+    def test_a_message_sent_mid_turn_is_the_request(self):
+        # Claude Code records a message typed while the assistant works as a queued_command attachment.
+        claude_transcript(self.transcript, "please make the change", [("t1", "Bash", {"command": "git push"})])
+        lines = self.transcript.read_text().splitlines()
+        queued = ["and then run the full suite", "commit, push, and redeploy as 0.4.0"]
+        for n, text in enumerate(queued):
+            lines.insert(2 + n, json.dumps({"type": "attachment", "uuid": f"q{n}", "timestamp": f"2026-09-28T10:00:3{n}Z", "attachment": {
+                "type": "queued_command", "prompt": text, "commandMode": "prompt", "origin": {"kind": "human"}, "humanTurn": True}}))
+        self.transcript.write_text("\n".join(lines) + "\n")
+        self.run_hook("Bash", {"command": "git push"})
+        state = self.server.requests[-1]["body"]["state"]
+        self.assertEqual(state["task"], "\n\n".join(["please make the change", *queued]))
+        texts = [m["text"] for m in state["conversation"] if m["role"] == "user"]
+        self.assertEqual(texts[-3:], ["please make the change", *queued])
+
     def test_the_read_write_score_is_logged(self):
         self.server.values["writes"] = 0.1
         self.run_hook("Bash", {"command": "python3 -c 'print(1)'"})

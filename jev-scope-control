@@ -1128,6 +1128,17 @@ def split_calls(calls: list[dict]) -> tuple[list[dict], list[dict]]:
 
 
 
+def queued_prompt(e: dict) -> str | None:
+    """A message the person typed while the assistant was working. Claude Code records it as a
+    queued_command attachment, not as a user message, so it was missed and the call was judged against
+    the request before it."""
+    a = e.get("attachment") if e.get("type") == "attachment" else None
+    if not isinstance(a, dict) or a.get("type") != "queued_command" or (a.get("origin") or {}).get("kind") != "human":
+        return None
+    text = a.get("prompt")
+    return text.strip() if isinstance(text, str) and is_real_user_text(text) else None
+
+
 def parse_claude(entries: list[dict]) -> tuple[str, list[dict], str | None, list[dict]]:
     """Return (task, actions, model, earlier actions) from a Claude Code transcript.
 
@@ -1140,6 +1151,13 @@ def parse_claude(entries: list[dict]) -> tuple[str, list[dict], str | None, list
     """
     task_index, task, task_time = -1, "", ""
     for i, e in enumerate(entries):
+        queued = None if e.get("isSidechain") else queued_prompt(e)
+        if queued and str(e.get("timestamp") or "") >= task_time:
+            # The request is the last message plus every message queued after it.
+            task = f"{task}\n\n{queued}" if task else queued
+            if task_index < 0:
+                task_index, task_time = i, str(e.get("timestamp") or "")
+            continue
         if e.get("type") != "user" or e.get("isMeta") or e.get("isSidechain") or e.get("isCompactSummary"):
             continue
         content = (e.get("message") or {}).get("content")
@@ -1371,6 +1389,10 @@ def conversation_claude(entries: list[dict], reply: str) -> list[dict]:
         if e.get("isSidechain") or e.get("isCompactSummary"):
             continue
         if e.get("type") == "attachment":
+            queued = queued_prompt(e)
+            if queued:
+                add(stamp, "user", queued)
+                continue
             a = e.get("attachment") or {}
             source = ""
             if a.get("type") == "hook_additional_context":

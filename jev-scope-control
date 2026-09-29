@@ -401,9 +401,10 @@ WRITE_QUESTION = {
 WRITE_BAR = 0.5
 
 
-def is_write(tool: str, tool_input, api_key: str, ask=None) -> bool:
+def write_score(tool: str, tool_input, api_key: str, ask=None) -> float:
+    """Jev's score that the command writes; a missing answer counts as a write."""
     response = (ask or ask_jev)({"tool_call": {"tool": tool, "input": tool_input}}, WRITE_QUESTION, api_key)
-    return noul_values(response).get("writes", 1.0) > WRITE_BAR
+    return noul_values(response).get("writes", 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +590,7 @@ def context(hook_input: dict, harness: str) -> tuple[str, list[dict], list[dict]
     entries = read_jsonl(path)
     parse, conversation = (parse_codex, conversation_codex) if harness == "codex" else (parse_claude, conversation_claude)
     task, actions, _model, earlier = parse(entries)
-    return task, actions, earlier, conversation(entries), found
+    return task, actions, earlier, conversation(entries, ""), found
 
 
 def scope_state(task: str, actions: list[dict], earlier: list[dict], conversation: list[dict], tool: str, tool_input) -> tuple[dict, int]:
@@ -608,6 +609,17 @@ def scope_state(task: str, actions: list[dict], earlier: list[dict], conversatio
 
 # ---------------------------------------------------------------------------
 # Context: how the transcript is read and the state sent to Jev is built.
+
+# A double-check note another plugin posted, recognized by how it starts: "[plugin] Double-check these before
+# you finish:", or that note already cut down by plugin_note. The plugin's own bracketed name is its marker.
+_NOTE_RE = re.compile(r"\[([a-z0-9][a-z0-9-]*)\] (?:Double-check these before you finish:|asked the assistant to double-check:)")
+
+
+def note_marker(text: str) -> str | None:
+    """The bracketed marker of the plugin whose note this is, when it starts within the first 300 characters."""
+    match = _NOTE_RE.search(text[:300])
+    return f"[{match.group(1)}]" if match else None
+
 
 NO_RESULT = "(no result recorded)"
 # Earlier turns' actions back up claims about work done before the task message. More than this
@@ -1030,7 +1042,7 @@ _NOT_TYPED_PREFIXES = (
 
 def is_real_user_text(text: str) -> bool:
     stripped = text.strip()
-    if not stripped:
+    if not stripped or note_marker(stripped):
         return False
     return not stripped.startswith(_NOT_TYPED_PREFIXES)
 
@@ -1296,23 +1308,49 @@ def hook_text(text: str) -> str | None:
     stripped = text.strip()
     if stripped.startswith("Stop hook feedback:"):
         return stripped[len("Stop hook feedback:") :].strip()  # its attachment copy names the hook
-    if re.match(r"The [\w.-]+ plugin sent a message:", stripped):  # Claude Code's wrapper for any plugin
+    wrapper = re.match(r"The ([\w.-]+) plugin sent a message:", stripped)  # Claude Code's wrapper
+    if wrapper and note_marker(stripped) == f"[{wrapper.group(1)}]":
         return stripped
     if stripped.startswith("<hook_prompt"):
         return re.sub(r"</?hook_prompt[^>]*>", "", stripped).strip()
+    if note_marker(stripped):
+        return stripped
     return None
 
 _QUOTED_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
-def without_reply(messages: list[dict]) -> list[dict]:
-    """The messages up to, not including, the reply being checked (the last assistant message)."""
-    last = max((i for i, m in enumerate(messages) if m["role"] == "assistant"), default=len(messages))
-    return messages[:last]
+def plugin_note(text: str) -> str:
+    """This plugin's earlier note cut to what it asked about. Its verdicts ("None of your actions show
+    this") were taken as evidence against the revision, raising true claims backed by tool output to
+    0.84; without the note, a reply saying it fixed "the flagged sentence" had nothing to refer to."""
+    marker = note_marker(text) or ""
+    items = []
+    for line in text.splitlines():
+        if not line.startswith("- "):
+            continue
+        kind = line[2:].split(":", 1)[0]
+        quoted = _QUOTED_RE.search(line)
+        items.append(f"{kind}: {quoted.group()}" if quoted else kind)
+    return f"{marker} asked the assistant to double-check: " + "; ".join(items) if items else marker
+
+
+def without_reply(messages: list[dict], reply: str) -> list[dict]:
+    """The messages up to, not including, the reply being checked.
+
+    The Stop hook can run before the host writes the reply to the transcript. Dropping the last
+    assistant message then dropped the previous reply and the person's request after it, so the
+    reply is dropped only where its own text is found.
+    """
+    reply = reply.strip()
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i]["role"] == "assistant" and messages[i]["text"].strip() == reply:
+            return messages[:i]
+    return messages
 
 
 
-def conversation_claude(entries: list[dict]) -> list[dict]:
+def conversation_claude(entries: list[dict], reply: str) -> list[dict]:
     """Return the session's messages before the reply being checked, oldest first: what the person
     typed, what the assistant said (its replies within this turn too), and what hooks and plugins sent
     in the user's place ("hook").
@@ -1367,17 +1405,20 @@ def conversation_claude(entries: list[dict]) -> list[dict]:
         add(stamp, e["type"], text)
     ordered: list[dict] = []
     for _, m in sorted(messages.items(), key=lambda kv: kv[0][0]):
+        if m["role"] == "hook" and note_marker(m["text"]):
+            m = {**m, "text": plugin_note(m["text"])}
         if m["role"] == "hook" and ordered and ordered[-1]["role"] == "hook" and ordered[-1]["text"] == m["text"]:
             ordered[-1]["source"] = ordered[-1]["source"] or m["source"]
             continue
         ordered.append(m)
     return without_reply(
-        [{"role": m["role"], "text": f'{m["source"]}: {m["text"]}' if m.get("source") else m["text"]} for m in ordered]
+        [{"role": m["role"], "text": f'{m["source"]}: {m["text"]}' if m.get("source") else m["text"]} for m in ordered],
+        reply,
     )
 
 
 
-def conversation_codex(entries: list[dict]) -> list[dict]:
+def conversation_codex(entries: list[dict], reply: str) -> list[dict]:
     """Return the session's messages before the reply being checked from a Codex rollout file, as
     conversation_claude does."""
     ordered = []
@@ -1391,7 +1432,7 @@ def conversation_codex(entries: list[dict]) -> list[dict]:
                 ordered.append({"role": "hook", "text": note})
             elif p["role"] == "assistant" or is_real_user_text(text):
                 ordered.append({"role": p["role"], "text": text})
-    return without_reply(ordered)
+    return without_reply(ordered, reply)
 
 # TypeSafe doesn't publish Jev's tokenizer. Its counts match Qwen3.5's on English and code, but
 # that tokenizer isn't in the standard library, so estimate from the pieces it splits text into.
@@ -1634,7 +1675,7 @@ def given_conversation(hook_input: dict) -> list[dict]:
         {"role": str(m.get("role") or ""), "text": str(m.get("text") or "")}
         for m in messages if isinstance(m, dict) and str(m.get("text") or "").strip()
     ] if isinstance(messages, list) else []
-    return given
+    return [{"role": "hook", "text": plugin_note(m["text"])} if note_marker(m["text"]) else m for m in given]
 
 
 # ---------------------------------------------------------------------------
@@ -1720,7 +1761,17 @@ def short_call(tool: str, tool_input) -> str:
     return one_line(f"{tool}: {stringify(tool_input)}", 100)
 
 
-DO_NOT_WORK_AROUND = "Do not work around this. If you believe the step is needed, stop and ask the user; otherwise continue with what was asked."
+DO_NOT_WORK_AROUND = (
+    "In your reply, tell the user plainly what you were trying to do with this call and why, and that "
+    "jev-scope-control blocked it for the reasons above. Do not retry it or work around it. If you believe the step "
+    "is needed, ask the user; otherwise continue with what was asked."
+)
+
+
+def denial_reason(tool: str, flagged: list[str], repeat: bool = False) -> str:
+    """The message the model gets: what was flagged, and that it must tell the user what it tried."""
+    head = f"this {tool} call was already denied for this request" if repeat else f"this {tool} call looks outside what the user asked for or agreed to"
+    return "\n".join([f"{MARKER} Denied: {head}."] + [f"- {FEEDBACK[name]}" for name in flagged if name in FEEDBACK] + [DO_NOT_WORK_AROUND])
 
 
 def deny(reason: str, user_message: str) -> dict:
@@ -1772,23 +1823,25 @@ def run(hook_input: dict) -> dict | None:
     task_key = hashlib.sha256(task.encode()).hexdigest()[:16]
     call_key = hashlib.sha256(f"{tool}\0{json.dumps(tool_input, sort_keys=True)}".encode()).hexdigest()[:16]
     if session.get("denied_for") != task_key:
-        session["denied_for"], session["denied_calls"] = task_key, []
+        session["denied_for"], session["denied_calls"], session["denied_flags"] = task_key, [], {}
     denied_calls = list(session["denied_calls"])
     if call_key in denied_calls:
-        log({**base, "denied": True, "repeat": True, "task": one_line(task, 300)})
+        earlier_flags = session.get("denied_flags", {}).get(call_key, [])
+        log({**base, "denied": True, "repeat": True, "flagged": earlier_flags, "task": one_line(task, 300)})
         return deny(
-            f"{MARKER} Denied: this {tool} call was already denied for this request. {DO_NOT_WORK_AROUND}",
-            f"jev-scope-control denied {short_call(tool, tool_input)} (already denied for this request)",
+            denial_reason(tool, earlier_flags, repeat=True),
+            f"jev-scope-control denied {short_call(tool, tool_input)} again ({', '.join(SHORT[n] for n in earlier_flags if n in SHORT) or 'already denied for this request'})",
         )
 
     if (tool or "").lower() in SHELL_TOOLS:
         # If the read/write question fails, the command is taken as a write and gets the scope check.
         try:
-            writes = is_write(tool, tool_input, key)
+            writes = write_score(tool, tool_input, key)
         except (urllib.error.URLError, OSError, ValueError, TypeError) as error:
             log({**base, "error": f"read/write question failed, checking scope: {type(error).__name__}: {error}"})
-            writes = True
-        if not writes:
+            writes = 1.0
+        base["writes"] = writes
+        if writes <= WRITE_BAR:
             log({**base, "skipped": "read-only command"})
             return None
 
@@ -1811,15 +1864,12 @@ def run(hook_input: dict) -> dict | None:
         log(entry)
         save_session(session_id, session)
         return None
+    flagged.sort(key=lambda name: -scores[name])
     session["denied_calls"] = [*denied_calls, call_key]
+    session["denied_flags"] = {**session.get("denied_flags", {}), call_key: flagged}
     save_session(session_id, session)
     log(entry)
-    flagged.sort(key=lambda name: -scores[name])
-    reason = "\n".join(
-        [f"{MARKER} Denied: this {tool} call looks outside what the user asked for or agreed to."]
-        + [f"- {FEEDBACK[name]}" for name in flagged]
-        + [DO_NOT_WORK_AROUND]
-    )
+    reason = denial_reason(tool, flagged)
     user_message = f"jev-scope-control denied {short_call(tool, tool_input)} ({', '.join(SHORT[n] for n in flagged)})"
     return deny(reason, user_message)
 

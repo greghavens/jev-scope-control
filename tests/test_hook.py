@@ -122,7 +122,8 @@ class HookTest(unittest.TestCase):
         self.assertEqual(specific["permissionDecision"], "deny")
         self.assertTrue(specific["permissionDecisionReason"].startswith("[jev-scope-control] Denied"))
         self.assertIn(jsc.FEEDBACK["unasked_publish"], specific["permissionDecisionReason"])
-        self.assertIn("Do not work around this", specific["permissionDecisionReason"])
+        self.assertIn("tell the user plainly what you were trying to do", specific["permissionDecisionReason"])
+        self.assertIn("Do not retry it or work around it", specific["permissionDecisionReason"])
         self.assertIn("jev-scope-control denied Bash: git push", output["systemMessage"])
 
     def test_threshold_is_strict_and_configurable(self):
@@ -187,6 +188,37 @@ class HookTest(unittest.TestCase):
         self.assertIsNotNone(self.run_hook("Bash", {"command": "python3 -c 'print(open(\"x\").read())'"}))
         self.assertEqual(len(self.server.requests), 3)
 
+    def test_the_request_and_the_reply_before_it_reach_jev(self):
+        # The current turn has only a tool call, no text yet. The reply before the request and the request
+        # itself were dropped, so "continue" reached Jev with nothing to continue.
+        claude_transcript(self.transcript, "continue", [("t1", "Bash", {"command": "rm build.log"})], earlier=[
+            ("user", "Remove the unverified_same_state question."),
+            ("assistant", "Removed the unverified_same_state question; next I delete the build log."),
+        ])
+        self.run_hook("Bash", {"command": "rm build.log"})
+        sent = [m["text"] for m in self.server.requests[-1]["body"]["state"]["conversation"]]
+        self.assertIn("Removed the unverified_same_state question; next I delete the build log.", sent)
+        self.assertEqual(sent[-1], "continue")
+
+    def test_another_plugins_note_is_not_taken_as_the_request(self):
+        note = "The jev-no-bullshit plugin sent a message:\n[jev-no-bullshit] Double-check these before you finish:\n- Unverified claim: \"It passes.\" Check this."
+        claude_transcript(self.transcript, "Fix the login bug.", [("t1", "Edit", {"file_path": "/p/login.ts", "old_string": "a", "new_string": "b"})],
+                          earlier=[("user", "Rename the helper."), ("assistant", "Renamed it. It passes.")])
+        lines = self.transcript.read_text().splitlines()
+        lines.append(json.dumps({"type": "user", "uuid": "n1", "timestamp": "2026-09-28T10:00:30Z", "message": {"role": "user", "content": note}}))
+        self.transcript.write_text("\n".join(lines) + "\n")
+        self.run_hook()
+        state = self.server.requests[-1]["body"]["state"]
+        self.assertEqual(state["task"], "Fix the login bug.")
+        notes = [m for m in state["conversation"] if "Double-check" in m["text"] or "double-check" in m["text"]]
+        self.assertTrue(notes and all(m["role"] == "hook" for m in notes), state["conversation"])
+
+    def test_the_read_write_score_is_logged(self):
+        self.server.values["writes"] = 0.1
+        self.run_hook("Bash", {"command": "python3 -c 'print(1)'"})
+        self.assertEqual(self.log()[-1]["writes"], 0.1)
+        self.assertEqual(self.log()[-1]["skipped"], "read-only command")
+
     def test_a_failed_read_write_question_gets_the_scope_check(self):
         self.server.fail_writes = True
         self.server.values["unasked_publish"] = 0.9
@@ -220,7 +252,7 @@ class HookTest(unittest.TestCase):
         self.assertEqual(state.pop("proposed_action")["tool"], "Edit")
         entries = jsc.read_jsonl(str(self.transcript))
         task, actions, _model, earlier = jsc.parse_claude(entries)
-        expected, _ = jsc.scope_state(task, actions, earlier, jsc.conversation_claude(entries), "Edit", {"file_path": "/p/login.ts"})
+        expected, _ = jsc.scope_state(task, actions, earlier, jsc.conversation_claude(entries, ""), "Edit", {"file_path": "/p/login.ts"})
         expected.pop("proposed_action")
         self.assertEqual(json.dumps(state), json.dumps(expected))  # byte for byte
         self.assertEqual(state["task"], "Now fix the login bug too.")
@@ -271,6 +303,8 @@ class HookTest(unittest.TestCase):
         self.server.values["unasked_publish"] = 0.05  # Jev is not asked again: the repeat is denied as is
         again = self.run_hook("Bash", {"command": "git push"})
         self.assertIn("already denied for this request", again["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn(jsc.FEEDBACK["unasked_publish"], again["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("tell the user plainly", again["hookSpecificOutput"]["permissionDecisionReason"])
         self.assertEqual(len(self.server.requests), 2)
         self.assertTrue(self.log()[-1]["repeat"])
         for _ in range(3):  # however many times it is retried

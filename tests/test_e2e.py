@@ -118,7 +118,7 @@ class _E2EBase(unittest.TestCase):
         # The model got the reason as the denied call's result.
         self.assertTrue(reply.startswith(REPLY), reply)
         self.assertIn(MARKER, reply)
-        self.assertIn("Do not work around this", reply)
+        self.assertIn("tell the user plainly what you were trying to do", reply)
 
 
 @unittest.skipUnless(CLAUDE_BIN, "claude CLI not found (set CLAUDE_BIN)")

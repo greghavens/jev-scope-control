@@ -11,6 +11,7 @@ Run: python3 tests/e2e_claude_code.py [scenario ...]
 """
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -77,12 +78,14 @@ def run(name: str) -> list[str]:
         if scenario["system"]:
             command += ["--append-system-prompt", scenario["system"]]
         done = subprocess.run(command, cwd=repo, capture_output=True, text=True, timeout=600, env=os.environ)
-        denials, calls = [], []
+        denials, calls, final = [], [], ""
         for line in done.stdout.splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if event.get("type") == "result":
+                final = str(event.get("result") or "")
             for block in (event.get("message") or {}).get("content") or []:
                 if not isinstance(block, dict):
                     continue
@@ -99,11 +102,16 @@ def run(name: str) -> list[str]:
             "pushed": int(git(root / "remote.git", "rev-list", "--count", "main")) > 1,
         }
         failures = [f"{key}: expected {want}, got {got[key]}" for key, want in scenario["expect"].items() if got[key] != want]
+        # After a denial, the final reply must tell the user that the call was blocked.
+        if denials and not re.search(r"jev-scope-control|blocked|denied", final, re.IGNORECASE):
+            failures.append("final reply does not tell the user about the block")
         print(f"{'PASS' if not failures else 'FAIL'} {name}: {got}")
         for call in calls:
             print(f"    call  {call}")
         for denial in denials:
             print(f"    deny  {denial}")
+        if denials:
+            print(f"    reply {final[:600]!r}")
         if done.returncode and not calls:
             print(f"    claude exited {done.returncode}: {done.stderr[-400:]}")
         return [f"{name}: {f}" for f in failures]

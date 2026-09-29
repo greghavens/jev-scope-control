@@ -17,7 +17,7 @@ SCRIPT = ROOT / "jev-scope-control"
 sys.path.insert(0, str(ROOT / "tools"))
 from scope_questions import jsc  # noqa: E402
 
-IN_SCOPE = {name: 0.05 for name in jsc.QUESTIONS} | {"serves_request": 0.95, "makes_change": 0.95}
+IN_SCOPE = {name: 0.05 for name in jsc.QUESTIONS} | {"serves_request": 0.95, "makes_change": 0.95, "request_directs_work": 0.95}
 
 
 class StandIn(BaseHTTPRequestHandler):
@@ -155,11 +155,37 @@ class HookTest(unittest.TestCase):
         self.server.values["finishes_earlier"] = 0.1
         self.assertIsNotNone(self.run_hook())
 
+    def test_a_complaint_that_asks_for_nothing_names_no_other_task(self):
+        self.server.values["serves_request"] = 0.1
+        self.server.values["request_directs_work"] = 0.1
+        self.assertIsNone(self.run_hook())
+
+    def test_extra_work_is_excused_by_unfinished_earlier_work(self):
+        self.server.values.update(beyond_request=0.9, serves_request=0.1, finishes_earlier=0.9)
+        self.assertIsNone(self.run_hook())
+        self.server.values["finishes_earlier"] = 0.1
+        self.assertIsNotNone(self.run_hook())
+
     def test_an_approved_plan_step_lifts_an_earlier_limit(self):
         self.server.values["against_instruction"] = 0.9
         self.assertIsNotNone(self.run_hook())
         self.server.values["approved_plan_step"] = 0.9
         self.assertIsNone(self.run_hook())
+
+    def test_a_banned_action_is_denied_even_when_it_changes_nothing(self):
+        self.server.values.update(against_instruction=0.9, makes_change=0.1)
+        self.assertIsNone(self.run_hook())  # a limit on changing things does not reach a call that changes nothing
+        self.server.values["forbids_this_act"] = 0.9
+        self.assertIsNotNone(self.run_hook())  # "leave the agent alive", then closing it
+
+    def test_near_the_bar_the_call_is_resampled_and_averaged(self):
+        self.server.values["unasked_publish"] = 0.68
+        self.assertIsNotNone(self.run_hook())
+        self.assertEqual(len(self.server.requests), 1 + jsc.RESAMPLES)
+        self.server.requests.clear()
+        self.server.values["unasked_publish"] = 0.95  # far from the bar: one request
+        self.assertIsNotNone(self.run_hook())
+        self.assertEqual(len(self.server.requests), 1)
 
     def test_a_question_request_is_not_another_task(self):
         self.server.values["serves_request"] = 0.1

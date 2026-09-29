@@ -18,11 +18,11 @@ def top(scores: dict) -> float:
 
 def rescore(row: dict) -> dict:
     try:
-        values = jsc.noul_values(jsc.ask_jev(row["state"], jsc.QUESTIONS, jsc.api_key(), timeout=30))
+        _, values, scores = jsc.judge(row["state"], jsc.api_key(), jsc.DEFAULT_THRESHOLD)
     except Exception as error:
         return {**row, "error": str(error)}
     return {**row, "before": row.get("scores", {}), "values": values,
-            "scores": {k: round(v, 2) for k, v in jsc.compose(values).items()}}
+            "scores": {k: round(v, 2) for k, v in scores.items()}}
 
 
 def main() -> None:

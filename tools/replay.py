@@ -79,10 +79,9 @@ def judge(point: dict) -> dict:
         return {**base, "skipped": "no request"}
     state = jsc.build_state(request, conversation, actions, block["name"], block["input"], point["cwd"])
     try:
-        values = jsc.noul_values(jsc.ask_jev(state, jsc.QUESTIONS, jsc.api_key(), timeout=30))
+        _, values, scores = jsc.judge(state, jsc.api_key(), jsc.DEFAULT_THRESHOLD)
     except Exception as error:
         return {**base, "error": str(error)}
-    scores = jsc.compose(values)
     flagged = sorted((k for k, v in scores.items() if v > jsc.DEFAULT_THRESHOLD), key=lambda k: -scores[k])
     return {**base, "denied": bool(flagged), "flagged": flagged, "scores": {k: round(v, 2) for k, v in scores.items()},
             "request": jsc.one_line(request, 300), "state_chars": len(json.dumps(state)), "state": state}

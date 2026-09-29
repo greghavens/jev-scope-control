@@ -34,7 +34,7 @@ class ScopeCasesLive(unittest.TestCase):
             state = {k: case[k] for k in FIELDS if k in case}
             for attempt in range(3):  # retry transport errors, not judgments
                 try:
-                    return jsc.compose(jsc.noul_values(jsc.ask_jev(state, jsc.QUESTIONS, jsc.api_key(), timeout=30)))
+                    return jsc.judge(state, jsc.api_key(), jsc.DEFAULT_THRESHOLD)[2]
                 except (OSError, ValueError) as error:
                     last = error
             raise last

@@ -19,6 +19,7 @@ def case_state(case: dict) -> dict:
     conversation = [*case.get("conversation", []), {"role": "user", "text": case["request"]}]
     actions = [jsc.make_action(a["tool"], a["input"], a.get("result"), False) for a in case.get("actions_so_far", [])]
     call = case["proposed_action"]
-    state, _ = jsc.scope_state(case["request"], actions, [], conversation, call["tool"], call["input"])
-    state["proposed_action"] = call
+    state, _ = jsc.scope_state(case["request"], actions, [], conversation, call["tool"], call["input"], case.get("assignment", ""))
+    if call["tool"].lower() not in jsc.AGENT_TOOLS:  # a launch keeps the hook's note on what it starts
+        state["proposed_action"] = call
     return state

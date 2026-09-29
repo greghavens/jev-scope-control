@@ -213,6 +213,38 @@ class HookTest(unittest.TestCase):
         notes = [m for m in state["conversation"] if "Double-check" in m["text"] or "double-check" in m["text"]]
         self.assertTrue(notes and all(m["role"] == "hook" for m in notes), state["conversation"])
 
+    def test_a_subagent_launch_is_checked_with_its_assignment(self):
+        prompt = "Fix the off-by-one in src/pagination.py and run the tests."
+        claude_transcript(self.transcript, "Fix the pagination bug.", [("t1", "Agent", {"description": "Fix pagination", "prompt": prompt})])
+        self.run_hook("Agent", {"description": "Fix pagination", "prompt": prompt, "subagent_type": "general-purpose"})
+        state = self.server.requests[-1]["body"]["state"]
+        self.assertEqual(state["proposed_action"]["tool"], "Agent")
+        self.assertEqual(state["proposed_action"]["input"]["prompt"], prompt)
+        self.assertIn("subagents", state["proposed_action"]["note"])
+        self.assertNotIn("writes", self.log()[-1])  # a launch is not asked the read/write question
+
+    def test_a_subagent_call_carries_its_assignment_and_actions(self):
+        # A workflow's agents are saved one folder deeper than other subagents.
+        claude_transcript(self.transcript, "go ahead and fix all discovered issues", [("m1", "Workflow", {"script": "..."})])
+        folder = self.transcript.with_suffix("") / "subagents" / "workflows" / "wf_1"
+        folder.mkdir(parents=True)
+        assignment = "Fix issue 3: src/queue.rs drops the last job when the queue is full."
+        sub = folder / "agent-a1b2.jsonl"
+        claude_transcript(sub, assignment, [("s1", "Read", {"file_path": "/p/src/queue.rs"}), ("t1", "Edit", {"file_path": "/p/src/queue.rs"})])
+        sub.write_text("".join(json.dumps({**json.loads(line), "isSidechain": True}) + "\n" for line in sub.read_text().splitlines()))
+        self.run_hook("Edit", {"file_path": "/p/src/queue.rs", "old_string": "a", "new_string": "b"}, agent_id="a1b2", agent_type="general-purpose")
+        state = self.server.requests[-1]["body"]["state"]
+        self.assertEqual(state["task"], "go ahead and fix all discovered issues")
+        self.assertEqual(state["subagent_assignment"]["text"], assignment)
+        self.assertEqual([a["tool"] for a in state["actions"]], ["Workflow", "Read", "Edit"])
+        self.assertNotIn("call_not_in_transcript", self.log()[-1])  # the call was found in the subagent's transcript
+
+    def test_a_subagent_without_a_transcript_is_logged(self):
+        claude_transcript(self.transcript, "Fix the pagination bug.", [("m1", "Agent", {"prompt": "fix it"})])
+        self.run_hook("Edit", agent_id="gone1")
+        self.assertNotIn("subagent_assignment", self.server.requests[-1]["body"]["state"])
+        self.assertTrue(self.log()[-1]["subagent_assignment_missing"])
+
     def test_a_message_sent_mid_turn_is_the_request(self):
         # Claude Code records a message typed while the assistant works as a queued_command attachment.
         claude_transcript(self.transcript, "please make the change", [("t1", "Bash", {"command": "git push"})])

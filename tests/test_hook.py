@@ -155,13 +155,9 @@ class HookTest(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertIn("rejected", json.dumps(out))
 
-    def test_near_the_bar_the_call_is_resampled_and_averaged(self):
-        self.server.values["unasked_publish"] = 0.68
+    def test_jev_is_asked_once_and_its_answer_is_used(self):
+        self.server.values["unasked_publish"] = 0.68  # near the bar: still one request
         self.assertIsNotNone(self.run_hook())
-        self.assertEqual(len(self.server.requests), 1 + jsc.RESAMPLES)
-        self.server.requests.clear()
-        self.server.values["unasked_publish"] = 0.95  # far from the bar: one request
-        self.assertIsNotNone(self.run_hook(tool_input={"file_path": "/p/login.ts", "old_string": "a", "new_string": "c"}))
         self.assertEqual(len(self.server.requests), 1)
 
     # --- state

@@ -1690,31 +1690,11 @@ def ask_jev(state: dict, questions: dict, api_key: str, timeout: float = JEV_TIM
     return outcome["response"]
 
 
-# Jev's answers vary a little from call to call, and a call scoring near the bar can land on either side.
-# Within this distance of the bar, the call is asked RESAMPLES more times and the scores are averaged.
-RESAMPLE_BAND = 0.08
-RESAMPLES = 2
-
-
 def judge(state: dict, api_key: str, bar: float, ask=None) -> tuple[dict, dict, dict]:
-    """Ask Jev about one call; returns (first response, first answers, decision scores).
-
-    Near the bar, the decision scores are the average over extra samples. A failed extra sample is left out.
-    """
-    ask = ask or ask_jev
-    response = ask(state, QUESTIONS, api_key)
+    """Ask Jev about one call, once; returns (response, answers, decision scores)."""
+    response = (ask or ask_jev)(state, QUESTIONS, api_key)
     values = noul_values(response)
-    scores = compose(values)
-    if abs(max(scores.values(), default=0.0) - bar) > RESAMPLE_BAND:
-        return response, values, scores
-    samples = [scores]
-    for _ in range(RESAMPLES):
-        try:
-            samples.append(compose(noul_values(ask(state, QUESTIONS, api_key))))
-        except (urllib.error.URLError, OSError, ValueError, TypeError):
-            pass
-    averaged = {name: sum(s.get(name, 0.0) for s in samples) / len(samples) for name in scores}
-    return response, values, averaged
+    return response, values, compose(values)
 
 
 def noul_values(response: dict) -> dict[str, float]:

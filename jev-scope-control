@@ -443,18 +443,14 @@ def key_files() -> list[Path]:
     return [config / "jev-scope-control" / "env", config / "jev-no-bullshit" / "env"]
 
 
-def api_key() -> str:
-    """TYPESAFE_API_KEY from the environment, else from the first key file that sets it."""
-    key = os.environ.get("TYPESAFE_API_KEY", "").strip()
-    if key:
-        return key
-    for path in key_files():
-        try:
-            lines = path.read_text().splitlines()
-        except OSError:
-            continue
+def key_from_file(path: Path, names: tuple[str, ...]) -> str:
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return ""
+    for name in names:
         for line in lines:
-            match = re.match(r"\s*(?:export\s+)?TYPESAFE_API_KEY\s*=\s*(.*)$", line)
+            match = re.match(rf"\s*(?:export\s+)?{name}\s*=\s*(.*)$", line)
             if match:
                 key = match.group(1).strip()
                 if len(key) >= 2 and key[0] == key[-1] and key[0] in "'\"":
@@ -462,6 +458,21 @@ def api_key() -> str:
                 if key:
                     return key
     return ""
+
+
+def api_key() -> str:
+    """This plugin's own key first, so its Jev usage can be tracked apart from other plugins.
+
+    JEV_SCOPE_CONTROL_API_KEY in the environment, then the key in ~/.config/jev-scope-control/env,
+    then the shared TYPESAFE_API_KEY in the environment, then ~/.config/jev-no-bullshit/env.
+    """
+    own_file, shared_file = key_files()
+    return (
+        os.environ.get("JEV_SCOPE_CONTROL_API_KEY", "").strip()
+        or key_from_file(own_file, ("JEV_SCOPE_CONTROL_API_KEY", "TYPESAFE_API_KEY"))
+        or os.environ.get("TYPESAFE_API_KEY", "").strip()
+        or key_from_file(shared_file, ("TYPESAFE_API_KEY",))
+    )
 
 
 def number_setting(name: str, default: float, minimum: float, maximum: float, integer: bool = False) -> float:
@@ -1776,7 +1787,7 @@ def run(hook_input: dict) -> dict | None:
 
     key = api_key()
     if not key:
-        error = "TYPESAFE_API_KEY is not set in this environment or in " + " or ".join(map(str, key_files()))
+        error = "TYPESAFE_API_KEY is not set, nor JEV_SCOPE_CONTROL_API_KEY, in this environment or in " + " or ".join(map(str, key_files()))
         log({**base, "error": error})
         return warn_once(session, session_id, "no-key", error)
 

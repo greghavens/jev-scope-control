@@ -291,6 +291,16 @@ class HookTest(unittest.TestCase):
         self.run_hook()
         self.assertEqual(self.server.requests[0]["auth"], "Bearer from-file")
 
+    def test_this_plugins_own_key_comes_before_the_shared_one(self):
+        self.env["JEV_SCOPE_CONTROL_API_KEY"] = "own-env"
+        self.run_hook()
+        self.assertEqual(self.server.requests[-1]["auth"], "Bearer own-env")
+        del self.env["JEV_SCOPE_CONTROL_API_KEY"]
+        (self.tmp / "config" / "jev-scope-control").mkdir(parents=True)
+        (self.tmp / "config" / "jev-scope-control" / "env").write_text("JEV_SCOPE_CONTROL_API_KEY=own-file\n")
+        self.run_hook()
+        self.assertEqual(self.server.requests[-1]["auth"], "Bearer own-file")
+
     def test_jev_error_lets_the_call_run(self):
         self.server.status = 503
         output = self.run_hook()

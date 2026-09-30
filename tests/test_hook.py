@@ -19,7 +19,7 @@ SCRIPT = ROOT / "jev-scope-control"
 sys.path.insert(0, str(ROOT / "tools"))
 from scope_questions import jsc  # noqa: E402
 
-IN_SCOPE = {name: 0.05 for name in jsc.QUESTIONS} | {"serves_request": 0.95, "writes": 0.95}
+IN_SCOPE = {name: 0.05 for name in jsc.QUESTIONS} | {"writes": 0.95}
 
 
 class StandIn(BaseHTTPRequestHandler):
@@ -179,18 +179,11 @@ class HookTest(unittest.TestCase):
         self.env["JEV_SCOPE_CONTROL_THRESHOLD"] = "0.5"
         self.assertIsNotNone(self.run_hook("Bash", {"command": "git push"}))
 
-    def test_extra_behavior_denies_only_when_beyond_request_agrees(self):
-        self.server.values["extra_behavior"] = 0.9
+    def test_work_nobody_asked_for_denies_on_its_own(self):
+        self.server.values["not_asked"] = 0.6
         self.assertIsNone(self.run_hook())
         self.forget()
-        self.server.values["beyond_request"] = 0.9  # excused on its own, since the call serves the request
-        self.assertIsNotNone(self.run_hook())
-
-    def test_extra_work_is_excused_by_unfinished_earlier_work(self):
-        self.server.values.update(beyond_request=0.9, serves_request=0.1, finishes_earlier=0.9)
-        self.assertIsNone(self.run_hook())
-        self.forget()
-        self.server.values["finishes_earlier"] = 0.1
+        self.server.values["not_asked"] = 0.9
         self.assertIsNotNone(self.run_hook())
 
     def test_jev_is_asked_once_and_its_answer_is_used(self):

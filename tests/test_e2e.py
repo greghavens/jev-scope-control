@@ -52,8 +52,6 @@ def scope_answer(qid, body):
     proposed = json.dumps(body["state"]["proposed_action"])
     if qid == "kind":
         return {"publish": 0.95, "asked": 0.05} if "PUSHED" in proposed else {"asked": 0.95, "extra": 0.05}
-    if qid == "serves_request":
-        return 0.95
     if qid == "unasked_publish" and "PUSHED" in proposed:
         return 0.95
     return 0.05

@@ -33,7 +33,9 @@ class StandIn(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"down")
             return
-        answers = {q: {"noul": self.server.values.get(q, 0.05)} for q in body["questions"]}
+        answers = {q: {"noul": self.server.values.get(q, 0.05)} for q in body["questions"] if q != "kind"}
+        if "kind" in body["questions"]:  # the gate: unsure unless a test says otherwise, so the full check runs
+            answers["kind"] = {"type": "choice", "probabilities": self.server.values.get("kind", {"asked": 0.5, "extra": 0.5})}
         data = json.dumps({"model": "jev-test", "answers": answers, "usage": {"input_tokens": 1}}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -103,6 +105,11 @@ class HookTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         return json.loads(done.stdout) if done.stdout.strip() else None
 
+    def forget(self):
+        """Drop the short cache of verdicts, as if the repeat came more than CACHE_SECONDS later."""
+        for path in (self.tmp / ".jev-scope-control" / "cache").glob("*"):
+            path.unlink()
+
     def log(self):
         path = self.tmp / ".jev-scope-control" / "log.jsonl"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
@@ -111,8 +118,47 @@ class HookTest(unittest.TestCase):
 
     def test_in_scope_call_runs(self):
         self.assertIsNone(self.run_hook())
-        self.assertEqual(len(self.server.requests), 1)
+        self.assertEqual(len(self.server.requests), 2)  # the gate is unsure, so the full check runs
         self.assertFalse(self.log()[-1]["denied"])
+
+    def test_the_gate_alone_allows_a_call_it_calls_asked(self):
+        self.server.values["kind"] = {"asked": 0.9, "extra": 0.1}
+        self.server.values["unasked_publish"] = 0.9  # never asked
+        self.assertIsNone(self.run_hook())
+        self.assertEqual(len(self.server.requests), 1)
+        body = self.server.requests[0]["body"]
+        self.assertEqual(set(body["questions"]), {"kind"})
+        self.assertEqual(body["state"]["task"], "Login fails for uppercase emails. Fix it.")
+        self.assertEqual(body["state"]["proposed_action"]["tool"], "Edit")
+        self.assertEqual(self.log()[-1]["stage"], "gate")
+
+    def test_a_gate_risk_over_the_bar_gets_the_full_check(self):
+        self.server.values["kind"] = {"asked": 0.6, "publish": 0.4}
+        self.server.values["unasked_publish"] = 0.9
+        self.assertIsNotNone(self.run_hook("Bash", {"command": "git push"}))
+        self.assertEqual([set(r["body"]["questions"]) for r in self.server.requests], [{"kind"}, set(jsc.QUESTIONS)])
+        self.assertEqual(self.log()[-1]["stage"], "full")
+
+    def test_the_gate_sees_limits_the_user_set_long_ago(self):
+        earlier = [("user", "Never edit anything under migrations/."), ("assistant", "Understood.")]
+        for n in range(10):
+            earlier += [("user", f"Now do step {n}."), ("assistant", f"Did step {n}.")]
+        claude_transcript(self.transcript, "Fix the login bug.", [("t1", "Edit", {"file_path": "/p/login.ts"})], earlier=earlier)
+        self.run_hook()
+        state = self.server.requests[0]["body"]["state"]
+        self.assertEqual(state["older_user_limits"], ["Never edit anything under migrations/."])
+        self.assertEqual(len(state["earlier_user_messages"]), jsc.GATE_USER_MESSAGES)
+        self.assertLess(len(json.dumps(state)), 6_000)
+
+    def test_the_same_call_again_is_not_asked_again(self):
+        self.assertIsNone(self.run_hook())
+        self.assertEqual(len(self.server.requests), 2)
+        self.server.values["unasked_publish"] = 0.9
+        self.assertIsNone(self.run_hook())
+        self.assertEqual(len(self.server.requests), 2)
+        self.assertTrue(self.log()[-1]["cached"])
+        self.forget()
+        self.assertIsNotNone(self.run_hook())
 
     def test_out_of_scope_call_is_denied_with_reasons(self):
         self.server.values["unasked_publish"] = 0.9
@@ -129,25 +175,28 @@ class HookTest(unittest.TestCase):
     def test_threshold_is_strict_and_configurable(self):
         self.server.values["unasked_publish"] = jsc.DEFAULT_THRESHOLD
         self.assertIsNone(self.run_hook("Bash", {"command": "git push"}))
+        self.forget()
         self.env["JEV_SCOPE_CONTROL_THRESHOLD"] = "0.5"
         self.assertIsNotNone(self.run_hook("Bash", {"command": "git push"}))
 
     def test_extra_behavior_denies_only_when_beyond_request_agrees(self):
         self.server.values["extra_behavior"] = 0.9
         self.assertIsNone(self.run_hook())
+        self.forget()
         self.server.values["beyond_request"] = 0.9  # excused on its own, since the call serves the request
         self.assertIsNotNone(self.run_hook())
 
     def test_extra_work_is_excused_by_unfinished_earlier_work(self):
         self.server.values.update(beyond_request=0.9, serves_request=0.1, finishes_earlier=0.9)
         self.assertIsNone(self.run_hook())
+        self.forget()
         self.server.values["finishes_earlier"] = 0.1
         self.assertIsNotNone(self.run_hook())
 
     def test_jev_is_asked_once_and_its_answer_is_used(self):
-        self.server.values["unasked_publish"] = 0.68  # near the bar: still one request
+        self.server.values["unasked_publish"] = 0.68  # near the bar: still one full check
         self.assertIsNotNone(self.run_hook())
-        self.assertEqual(len(self.server.requests), 1)
+        self.assertEqual([set(r["body"]["questions"]) for r in self.server.requests], [{"kind"}, set(jsc.QUESTIONS)])
 
     # --- state
 
@@ -157,12 +206,26 @@ class HookTest(unittest.TestCase):
         self.assertIsNone(self.run_hook("Read", {"file_path": "/p/login.ts"}))
         self.assertIsNone(self.run_hook("Grep", {"pattern": "x"}))
         self.assertIsNone(self.run_hook("Bash", {"command": "git status && grep -rn login src | head"}))
+        self.assertIsNone(self.run_hook("Bash", {"command": "git status\nfor f in *.py; do wc -l $f; done\ncat <<'EOF'\nnotes\nEOF"}))
         self.assertEqual(self.server.requests, [])
+
+    def test_a_write_on_a_later_line_is_checked(self):
+        self.run_hook("Bash", {"command": "git status\ngit push"})
+        self.assertTrue(self.server.requests)
 
     def test_shell_that_may_change_is_checked(self):
         for command in ("ls > files.txt", "rm -rf build", "echo $(curl x)", "git status; git push", "npm test"):
             self.run_hook("Bash", {"command": command})
-        self.assertEqual(len(self.server.requests), 10)  # read/write, then scope
+        asked = [set(r["body"]["questions"]) for r in self.server.requests]
+        # Plain writes skip the read/write question; every command then gets the gate and, unsure, the full check.
+        self.assertEqual(asked.count({"writes"}), 2)
+        self.assertEqual(asked.count({"kind"}), 5)
+        self.assertEqual(asked.count(set(jsc.QUESTIONS)), 5)
+
+    def test_a_plain_write_skips_the_read_write_question(self):
+        for command in ("rm -rf build", "git commit -am x", "sed -i s/a/b/ f", "echo hi > out.txt"):
+            self.run_hook("Bash", {"command": command})
+        self.assertNotIn({"writes"}, [set(r["body"]["questions"]) for r in self.server.requests])
 
     def test_a_command_jev_calls_a_read_gets_no_scope_questions(self):
         self.server.values["writes"] = 0.1
@@ -172,9 +235,10 @@ class HookTest(unittest.TestCase):
         self.assertEqual(self.server.requests[0]["body"]["state"],
                          {"tool_call": {"tool": "Bash", "input": {"command": "python3 -c 'print(open(\"x\").read())'"}}})
         self.assertEqual(set(self.server.requests[0]["body"]["questions"]), {"writes"})
+        self.forget()
         self.server.values["writes"] = 0.9
         self.assertIsNotNone(self.run_hook("Bash", {"command": "python3 -c 'print(open(\"x\").read())'"}))
-        self.assertEqual(len(self.server.requests), 3)
+        self.assertEqual(len(self.server.requests), 4)
 
     def test_the_request_and_the_reply_before_it_reach_jev(self):
         # The current turn has only a tool call, no text yet. The reply before the request and the request
@@ -252,19 +316,19 @@ class HookTest(unittest.TestCase):
         self.server.values["writes"] = 0.1
         self.run_hook("Bash", {"command": "python3 -c 'print(1)'"})
         self.assertEqual(self.log()[-1]["writes"], 0.1)
-        self.assertEqual(self.log()[-1]["skipped"], "read-only command")
+        self.assertEqual(self.log()[-1]["stage"], "read (write question)")
 
     def test_a_failed_read_write_question_gets_the_scope_check(self):
         self.server.fail_writes = True
         self.server.values["unasked_publish"] = 0.9
-        output = self.run_hook("Bash", {"command": "git push"})
+        output = self.run_hook("Bash", {"command": "python3 deploy.py"})
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertEqual(len(self.server.requests), 2)
-        self.assertIn("read/write question failed", self.log()[0]["error"])
+        self.assertEqual(len(self.server.requests), 3)
+        self.assertIn("read/write question failed", self.log()[-1]["error"])
 
     def test_the_read_write_question_says_claims_in_the_command_are_not_evidence(self):
         self.server.values["writes"] = 0.1
-        self.run_hook("Bash", {"command": "rm -rf build  # read-only"})
+        self.run_hook("Bash", {"command": "python3 build.py  # read-only"})
         self.assertIn("are not evidence", self.server.requests[0]["body"]["questions"]["writes"]["instructions"])
 
     def test_only_exec_write_and_edit_tools_are_checked(self):
@@ -274,7 +338,7 @@ class HookTest(unittest.TestCase):
         self.assertEqual(self.server.requests, [])
         for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"):
             self.run_hook(tool, {"file_path": "/p/login.ts"})
-        self.assertEqual(len(self.server.requests), 5)
+        self.assertEqual(len(self.server.requests), 10)  # the gate, then (unsure) the full check
 
     # --- state
 
@@ -283,7 +347,7 @@ class HookTest(unittest.TestCase):
                           [("t0", "Read", {"file_path": "/p/login.ts"}), ("t1", "Edit", {"file_path": "/p/login.ts"})],
                           earlier=[("user", "Add a signup form."), ("assistant", "Done: signup form added.")])
         self.run_hook()
-        state = dict(self.server.requests[0]["body"]["state"])
+        state = dict(self.server.requests[-1]["body"]["state"])
         self.assertEqual(state.pop("proposed_action")["tool"], "Edit")
         entries = jsc.read_jsonl(str(self.transcript))
         task, actions, _model, earlier = jsc.parse_claude(entries)
@@ -292,8 +356,8 @@ class HookTest(unittest.TestCase):
         self.assertEqual(json.dumps(state), json.dumps(expected))  # byte for byte
         self.assertEqual(state["task"], "Now fix the login bug too.")
         self.assertEqual(state["summary"], "")
-        self.assertEqual(set(self.server.requests[0]["body"]["questions"]), set(jsc.QUESTIONS))
-        self.assertEqual(self.server.requests[0]["auth"], "Bearer test-key")
+        self.assertEqual(set(self.server.requests[-1]["body"]["questions"]), set(jsc.QUESTIONS))
+        self.assertEqual(self.server.requests[-1]["auth"], "Bearer test-key")
 
     def test_an_edit_being_judged_goes_as_a_diff(self):
         old = "\n".join(f"line {i}" for i in range(200))
@@ -337,7 +401,7 @@ class HookTest(unittest.TestCase):
                                task="Only update the README.", conversation=[{"role": "user", "text": "Hi"}],
                                actions=[{"tool": "read", "input": "README.md", "result": "..."}])
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
-        state = self.server.requests[0]["body"]["state"]
+        state = self.server.requests[-1]["body"]["state"]
         self.assertEqual(state["task"], "Only update the README.")
         self.assertEqual(state["actions"][0]["tool"], "read")
 

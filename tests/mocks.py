@@ -103,21 +103,25 @@ def systemone_request_errors(body) -> list[dict]:
         err(["questions"], "questions must be a nonempty object")
         return errors
     for name, question in questions.items():
-        if not isinstance(question, dict) or question.get("type") != "noul":
-            err(["questions", name, "type"], 'this stand-in only answers type "noul"')
+        if not isinstance(question, dict) or question.get("type") not in ("noul", "choice"):
+            err(["questions", name, "type"], 'this stand-in only answers types "noul" and "choice"')
             continue
         for key in set(question) - {"type", "instructions", "criteria"}:
             err(["questions", name, key], "extra fields not permitted")
         if question.get("instructions") is not None and not isinstance(question["instructions"], json_content):
             err(["questions", name, "instructions"], "instructions must be a string, object or array")
         criteria = question.get("criteria")
-        if criteria is not None and (not isinstance(criteria, dict) or set(criteria) - {"true", "false"}):
+        if question["type"] == "choice":
+            if not isinstance(criteria, dict) or len(criteria) < 2 or not all(isinstance(v, str) for v in criteria.values()):
+                err(["questions", name, "criteria"], "a choice needs two or more named criteria")
+        elif criteria is not None and (not isinstance(criteria, dict) or set(criteria) - {"true", "false"}):
             err(["questions", name, "criteria"], 'criteria may only have "true" and "false"')
     return errors
 
 
 class MockJev(_MockServer):
-    """POST /v1/systemone. `answer(qid, body) -> float` decides each noul.
+    """POST /v1/systemone. `answer(qid, body) -> float` decides each noul; for a choice it returns the
+    probabilities by criterion, or anything else for all on the first criterion.
 
     Rejects any request that doesn't match TypeSafe's SystemOneRequest schema with a 422, as the real API
     does, and answers in the SystemOneResponse shape (model, answers keyed by question name, usage).
@@ -162,9 +166,20 @@ class MockJev(_MockServer):
             return
         self.send_json(handler, 200, {
             "model": "jev-2026-09-15",
-            "answers": {q: {"type": "noul", "noul": self.answer(q, body)} for q in body["questions"]},
+            "answers": {q: self._answer(q, body) for q in body["questions"]},
             "usage": {"input_tokens": 100, "output_tokens": 5},
         })
+
+
+    def _answer(self, qid, body):
+        question = body["questions"][qid]
+        if question["type"] != "choice":
+            return {"type": "noul", "noul": self.answer(qid, body)}
+        value = self.answer(qid, body)
+        names = list(question["criteria"])
+        probabilities = {n: float(value.get(n, 0.0)) for n in names} if isinstance(value, dict) else {n: float(n == names[0]) for n in names}
+        choice = max(probabilities, key=probabilities.get)
+        return {"type": "choice", "choice": choice, "confidence": probabilities[choice], "probabilities": probabilities}
 
 
 # A scripted three-step turn shared by both model mocks:

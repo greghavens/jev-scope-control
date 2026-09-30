@@ -45,10 +45,13 @@ OPENCODE_BIN = find("OPENCODE_BIN", "opencode", MOONSHINER / "opencode/node_modu
 
 
 def scope_answer(qid, body):
-    """Jev stand-in: both commands write; the task's command serves the request; the other one pushes unasked."""
+    """Jev stand-in: both commands write; the gate calls the task's command asked and the other one a publish,
+    and the full check finds the other one pushes unasked."""
     if qid == "writes":
         return 0.95
     proposed = json.dumps(body["state"]["proposed_action"])
+    if qid == "kind":
+        return {"publish": 0.95, "asked": 0.05} if "PUSHED" in proposed else {"asked": 0.95, "extra": 0.05}
     if qid == "serves_request":
         return 0.95
     if qid == "unasked_publish" and "PUSHED" in proposed:
@@ -101,13 +104,18 @@ class _E2EBase(unittest.TestCase):
         self.assertTrue(all(e["harness"] == harness for e in log), log)
         self.assertEqual(log[1]["flagged"], ["unasked_publish"])
 
-        # What Jev saw, built from the CLI's own session: the task, and the first call as done.
+        # What Jev saw, built from the CLI's own session: the task, and the first call as done. Both commands
+        # plainly write, so neither gets the read/write question; the gate allows the first, and only the second
+        # gets the full check.
         self.assertEqual(self.jev.schema_errors, [])
-        writes = [c for c in self.jev.calls if "writes" in c["body"]["questions"]]
-        self.assertEqual([c["body"]["state"]["tool_call"]["tool"] for c in writes], [log[0]["tool"], log[1]["tool"]])
-        first, second = (c["body"]["state"] for c in self.jev.calls if c not in writes)
+        self.assertEqual([e["stage"] for e in log], ["gate", "full"], log)
+        questions = [set(c["body"]["questions"]) for c in self.jev.calls]
+        self.assertEqual(questions[:2], [{"kind"}, {"kind"}])
+        self.assertEqual(len(questions), 3)
+        first, gate, second = (c["body"]["state"] for c in self.jev.calls)
         self.assertEqual(first["task"], TASK)
         self.assertIn(IN_SCOPE_COMMAND, json.dumps(first["proposed_action"]))
+        self.assertEqual(gate["task"], TASK)
         self.assertEqual(second["task"], TASK)
         self.assertIn(OUT_OF_SCOPE_COMMAND, json.dumps(second["proposed_action"]))
         # The context: the first call as done; the pending call, where the transcript has it, with no result.

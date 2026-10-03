@@ -3,6 +3,7 @@
   "version": "0.3.2",
   "private": true,
   "description": "PreToolUse hook that asks Jev whether a tool call is within the scope the user asked for or agreed to, and denies it with a reason when it is not.",
+  "license": "Apache-2.0",
   "type": "module",
   "repository": "github:greghavens/jev-scope-control",
   "keywords": [

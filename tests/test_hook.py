@@ -146,9 +146,7 @@ class HookTest(unittest.TestCase):
         claude_transcript(self.transcript, "Fix the login bug.", [("t1", "Edit", {"file_path": "/p/login.ts"})], earlier=earlier)
         self.run_hook()
         state = self.server.requests[0]["body"]["state"]
-        self.assertEqual(state["older_user_limits"], ["Never edit anything under migrations/."])
-        self.assertEqual(len(state["earlier_user_messages"]), jsc.GATE_USER_MESSAGES)
-        self.assertLess(len(json.dumps(state)), 6_000)
+        self.assertEqual(state["earlier_user_messages"], ["Never edit anything under migrations/."] + [f"Now do step {n}." for n in range(10)])
 
     def test_the_same_call_again_is_not_asked_again(self):
         self.assertIsNone(self.run_hook())
@@ -372,13 +370,12 @@ class HookTest(unittest.TestCase):
         self.assertLessEqual(len(line), jsc.HISTORY_INPUT_CHARS)
         self.assertEqual(state["actions"][0]["result"], "ok")
 
-    def test_older_user_messages_get_extra_room(self):
-        messages = [{"role": "user" if i % 2 else "assistant", "text": f"message {i} " + "word " * 200} for i in range(200)]
-        plain = jsc.conversation_lines(messages)
-        more = jsc.conversation_lines(messages, jsc.USER_MESSAGES_EXTRA_TOKENS)
-        extra = more[: len(more) - len(plain)]
-        self.assertTrue(extra and all(m["role"] == "user" for m in extra))
-        self.assertEqual(more[len(extra):], plain)
+    def test_every_user_message_comes_through_whole(self):
+        messages = [{"role": "user" if i % 2 else "assistant", "text": f"message {i} " + "word " * 2000} for i in range(200)]
+        lines = jsc.conversation_lines(messages)
+        self.assertEqual([m for m in lines if m["role"] == "user"], [m for m in messages if m["role"] == "user"])
+        assistant = [m for m in lines if m["role"] == "assistant"]
+        self.assertTrue(assistant and all(len(m["text"]) < len(messages[0]["text"]) for m in assistant))
 
     def test_codex_rollout(self):
         codex_rollout(self.transcript, "Rename the flag to --dry-run.", [("c1", "exec_command", json.dumps({"cmd": "sed -i s/x/y/ cli.py"}))])

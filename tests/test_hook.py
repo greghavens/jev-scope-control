@@ -377,6 +377,34 @@ class HookTest(unittest.TestCase):
         assistant = [m for m in lines if m["role"] == "assistant"]
         self.assertTrue(assistant and all(len(m["text"]) < len(messages[0]["text"]) for m in assistant))
 
+    def test_answers_in_question_dialogs_are_the_users_words(self):
+        question = {"question": "Download Qwen3.5-4B-Base as a control only?", "options": [
+            {"label": "Yes, as control only (Recommended)", "description": "Runs every bake-off test; never a candidate."},
+            {"label": "No", "description": "Use published numbers."}]}
+        answered = jsc.make_action("AskUserQuestion", {"questions": [question]},
+                                   f'Your questions have been answered: "{question["question"]}"="Yes, as control only (Recommended)". '
+                                   "You can now continue with these answers in mind.", False)
+        codex = jsc.make_action("request_user_input", {"questions": [{**question, "id": "qwen"}]},
+                                '{"answers":{"qwen":{"answers":["Yes, as control only (Recommended)"]}}}', False)
+        expected = ("After that message, the user answered the assistant's questions in a dialog:\n"
+                    f"- {question['question']}\n"
+                    '  option "Yes, as control only (Recommended)": Runs every bake-off test; never a candidate.\n'
+                    '  the user answered: "Yes, as control only (Recommended)"')
+        for action in (answered, codex):
+            gate = jsc.gate_state("STOP DOWNLOADING THINGS", [], "Bash", {"command": "hf download Qwen/Qwen3.5-4B-Base"}, actions=[action])
+            full, _ = jsc.scope_state("STOP DOWNLOADING THINGS", [action], [], [], "Bash", {"command": "hf download Qwen/Qwen3.5-4B-Base"})
+            self.assertEqual(gate["task"], "STOP DOWNLOADING THINGS\n\n" + expected)
+            self.assertEqual(full["task"], gate["task"])
+        typed = jsc.make_action("AskUserQuestion", {"questions": [question]},
+                                f'The user answered: "{question["question"]}"="only if it beats \\"No\\"". Read the answers carefully.', False)
+        text = jsc.dialog_answer(typed)
+        self.assertIn('the user answered: "only if it beats \\"No\\""', text)
+        self.assertIn('option "No": Use published numbers.', text)  # a typed answer carries every option
+        earlier, _ = jsc.scope_state("Go on.", [], [answered], [{"role": "user", "text": "Go on."}], "Bash", {"command": "ls"})
+        self.assertEqual([m["text"] for m in earlier["conversation"] if m["role"] == "user"],
+                         [expected.replace("After that message, the user", "The user"), "Go on."])
+        self.assertIsNone(jsc.dialog_answer(jsc.make_action("request_user_input", {}, "request_user_input can only be used by the root thread", False)))
+
     def test_codex_rollout(self):
         codex_rollout(self.transcript, "Rename the flag to --dry-run.", [("c1", "exec_command", json.dumps({"cmd": "sed -i s/x/y/ cli.py"}))])
         self.server.values["unrelated_target"] = 0.9

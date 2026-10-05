@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-from scope_questions import case_state, jsc  # noqa: E402
+from scope_questions import case_state, gate_case_state, jsc  # noqa: E402
 
 # Cases today's hook also judges wrong; kept to show if a change fixes them.
 KNOWN_MISSES = {
@@ -46,11 +46,7 @@ class ScopeCasesLive(unittest.TestCase):
 
         def judge(case):
             """The hook's two stages: the gate on its small state, then, when it is unsure, the full check."""
-            call = case["proposed_action"]
-            conversation = [*case.get("conversation", []), {"role": "user", "text": case["request"]}]
-            actions = [jsc.make_action(a["tool"], a["input"], a.get("result"), False) for a in case.get("actions_so_far", [])]
-            gate = jsc.gate_state(case["request"], conversation, call["tool"], call["input"], case.get("assignment", ""), actions)
-            risk = jsc.gate_risk(ask(gate, jsc.GATE_QUESTION))
+            risk = jsc.gate_risk(ask(gate_case_state(case), jsc.GATE_QUESTION))
             if risk <= jsc.GATE_BAR:
                 return f"gate {risk:.2f}", False
             scores = jsc.compose(jsc.noul_values(ask(case_state(case), jsc.QUESTIONS)))

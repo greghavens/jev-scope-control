@@ -303,6 +303,53 @@ class HookTest(unittest.TestCase):
         texts = [m["text"] for m in state["conversation"] if m["role"] == "user"]
         self.assertEqual(texts[-3:], ["please make the change", *queued])
 
+    def test_tool_loaded_is_not_the_request(self):
+        # Claude Code writes "Tool loaded." as a user message after each tool the assistant loads.
+        claude_transcript(self.transcript, "Fix the pagination bug.", [("t1", "Edit", {"file_path": "/p/pagination.py"})])
+        lines = self.transcript.read_text().splitlines()
+        lines.insert(1, json.dumps({"type": "user", "uuid": "l1", "timestamp": "2026-09-28T10:00:30Z", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "x1", "content": [{"type": "tool_reference", "tool_name": "Monitor"}]},
+            {"type": "text", "text": "Tool loaded."}]}}))
+        self.transcript.write_text("\n".join(lines) + "\n")
+        self.run_hook()
+        state = self.server.requests[-1]["body"]["state"]
+        self.assertEqual(state["task"], "Fix the pagination bug.")
+        self.assertNotIn("Tool loaded.", [m["text"] for m in state["conversation"]])
+
+    def test_ultracode_is_read_from_the_transcript(self):
+        # Turning ultracode on or off for the session is an attachment; the word "ultracode" in a message turns it on
+        # for that request only.
+        def check(attachments):
+            claude_transcript(self.transcript, "Audit the training data.", [("t1", "Workflow", {"script": "..."})])
+            lines = self.transcript.read_text().splitlines()
+            for n, kind in enumerate(attachments):
+                lines.insert(n, json.dumps({"type": "attachment", "uuid": f"x{n}", "timestamp": f"2026-09-28T0{n + 1}:00:00Z",
+                                            "attachment": {"type": kind}}))
+            self.transcript.write_text("\n".join(lines) + "\n")
+            self.server.requests.clear()
+            self.forget()
+            self.run_hook("Workflow", {"script": "..."})
+            return [("ultracode" in r["body"]["state"]) for r in self.server.requests]
+
+        self.assertEqual(check(["ultra_effort_enter"]), [True, True])  # the gate and the full check both see it
+        self.assertTrue(self.log()[-1]["ultracode"])
+        self.assertEqual(check(["ultra_effort_enter", "ultra_effort_exit"]), [False, False])
+        self.assertEqual(check([]), [False, False])
+        claude_transcript(self.transcript, "ultracode: audit the training data.", [("t1", "Workflow", {"script": "..."})])
+        lines = self.transcript.read_text().splitlines()
+        lines.insert(1, json.dumps({"type": "attachment", "uuid": "k1", "timestamp": "2026-09-28T10:00:01Z", "attachment": {"type": "workflow_keyword_request"}}))
+        self.transcript.write_text("\n".join(lines) + "\n")
+        self.server.requests.clear()
+        self.forget()
+        self.run_hook("Workflow", {"script": "..."})
+        self.assertEqual([("ultracode" in r["body"]["state"]) for r in self.server.requests], [True, True])
+        lines.insert(2, json.dumps({"type": "user", "uuid": "u2", "timestamp": "2026-09-28T10:00:30Z", "message": {"role": "user", "content": "now fix it"}}))
+        self.transcript.write_text("\n".join(lines) + "\n")
+        self.server.requests.clear()
+        self.forget()
+        self.run_hook("Workflow", {"script": "..."})
+        self.assertEqual([("ultracode" in r["body"]["state"]) for r in self.server.requests], [False, False])  # a later message without the word
+
     def test_the_read_write_score_is_logged(self):
         self.server.values["writes"] = 0.1
         self.run_hook("Bash", {"command": "python3 -c 'print(1)'"})
